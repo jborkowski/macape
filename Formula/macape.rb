@@ -1,11 +1,11 @@
 class Macape < Formula
   desc "Reliable home-row modifiers daemon for macOS"
   homepage "https://github.com/jborkowski/macape"
-  head "https://github.com/jborkowski/macape.git", branch: "main"
   license "MIT"
+  head "https://github.com/jborkowski/macape.git", branch: "main"
 
-  depends_on :macos
   depends_on xcode: ["14.0", :build]
+  depends_on :macos
 
   def install
     system "swift", "build",
