@@ -1,0 +1,17 @@
+# macape — home-row modifiers config
+# Copy to ~/.config/macape/macape.conf and edit to taste.
+
+hold_timeout_ms = 200
+tap_timeout_ms  = 200
+
+# keycap = modifier
+#   modifiers: lcmd rcmd lalt ralt lctl rctl lsft rsft
+#              (also: cmd, alt, opt, ctl, ctrl, sft, shift, command, option, control)
+A = lcmd
+S = lalt
+D = lctl
+F = lsft
+J = rsft
+K = rctl
+L = ralt
+; = rcmd
