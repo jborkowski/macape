@@ -221,18 +221,6 @@ public enum HomeRowStateMachine {
         for i in snapshot.keys.indices {
             let key = snapshot.keys[i]
             guard key.state != .idle else { continue }
-            if !keyIsPhysicallyDown(key.keyCode) {
-                if key.state == .modifier {
-                    actions.append(.stuckRecovery(key: key.keyCode, reason: "modifier key up"))
-                } else if key.state == .pending {
-                    actions.append(.stuckRecovery(key: key.keyCode, reason: "pending key up"))
-                }
-                snapshot.keys[i].state = .idle
-                snapshot.keys[i].pressTimeMs = 0
-                snapshot.keys[i].modifierSinceMs = 0
-                continue
-            }
-
             if key.state == .pending,
                nowMs - key.pressTimeMs >= UInt64(key.holdTimeoutMs) {
                 snapshot.keys[i].state = .modifier

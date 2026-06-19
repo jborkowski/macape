@@ -96,15 +96,15 @@ final class StateMachineTests: XCTestCase {
         XCTAssertEqual(HomeRowStateMachine.activeModifiers(snapshot.keys), [.maskCommand, .maskAlternate])
     }
 
-    func testStuckRecoveryWhenKeyUpMissed() {
+    func testModifierStuckRecoveryUsesMaxHoldTimeout() {
         var snapshot = StateMachineSnapshot(keys: [key(0x00)])
         snapshot.keys[0].state = .modifier
         snapshot.keys[0].modifierSinceMs = 1000
         let actions = HomeRowStateMachine.tick(
             snapshot: &snapshot,
             layer: LayerConfig.default,
-            maxModifierHoldMs: 10_000,
-            nowMs: 1500,
+            maxModifierHoldMs: 500,
+            nowMs: 1600,
             keyIsPhysicallyDown: { _ in false }
         )
         XCTAssertEqual(snapshot.keys[0].state, .idle)
