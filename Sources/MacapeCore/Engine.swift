@@ -150,11 +150,6 @@ public final class Engine: @unchecked Sendable {
     private func install() throws {
         let bit: (CGEventType) -> CGEventMask = { CGEventMask(1) << CGEventMask($0.rawValue) }
         let mask = bit(.keyDown) | bit(.keyUp)
-            | bit(.leftMouseDown) | bit(.leftMouseUp)
-            | bit(.rightMouseDown) | bit(.rightMouseUp)
-            | bit(.otherMouseDown) | bit(.otherMouseUp)
-            | bit(.leftMouseDragged) | bit(.rightMouseDragged) | bit(.otherMouseDragged)
-            | bit(.scrollWheel)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
@@ -208,7 +203,7 @@ public final class Engine: @unchecked Sendable {
         }
 
         guard type == .keyDown || type == .keyUp else {
-            return handlePointingEvent(type: type, event: event, now: nowMs())
+            return Unmanaged.passUnretained(event)
         }
 
         let code: CGKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
@@ -246,25 +241,6 @@ public final class Engine: @unchecked Sendable {
             keyIsPhysicallyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) }
         )
         applyActions(actions)
-    }
-
-    private func handlePointingEvent(type: CGEventType, event: CGEvent, now: UInt64) -> Unmanaged<CGEvent>? {
-        guard snapshot.enabled else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        let beforeFlags = event.flags
-        let beforeMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
-        let beforeStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
-        let promoteActions = PointingEventModifier.applyHomeRowModifiers(
-            snapshot: &snapshot,
-            event: event,
-            nowMs: now
-        )
-        let afterMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
-        MacapeLog.debug("pointing type=\(type.rawValue) flagsBefore=\(describeFlags(beforeFlags)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) flagsAfter=\(describeFlags(event.flags)) statesBefore=[\(beforeStates)] actions=[\(describeActions(promoteActions))]")
-        applyActions(promoteActions)
-        return Unmanaged.passUnretained(event)
     }
 
     private func applyHandleActions(
