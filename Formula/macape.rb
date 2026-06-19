@@ -8,12 +8,14 @@ class Macape < Formula
   depends_on :macos
 
   def install
-    system "swift", "build",
-           "--configuration", "release",
-           "--disable-sandbox",
-           "--product", "macape",
-           "-Xswiftc", "-Osize"
-    bin.install ".build/release/macape"
+    buildpath.cd do
+      system "swift", "build",
+             "--configuration", "release",
+             "--disable-sandbox",
+             "--product", "macape",
+             "-Xswiftc", "-Osize"
+      bin.install ".build/release/macape"
+    end
 
     (etc/"macape").mkpath
     pkgshare.install "macape.conf.example"

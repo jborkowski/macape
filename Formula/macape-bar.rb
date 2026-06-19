@@ -9,12 +9,14 @@ class MacapeBar < Formula
   depends_on "jborkowski/macape/macape"
 
   def install
-    system "swift", "build",
-           "--configuration", "release",
-           "--disable-sandbox",
-           "--product", "macape-bar",
-           "-Xswiftc", "-Osize"
-    bin.install ".build/release/macape-bar"
+    buildpath.cd do
+      system "swift", "build",
+             "--configuration", "release",
+             "--disable-sandbox",
+             "--product", "macape-bar",
+             "-Xswiftc", "-Osize"
+      bin.install ".build/release/macape-bar"
+    end
   end
 
   service do
