@@ -114,7 +114,7 @@ public final class Engine: @unchecked Sendable {
 
     public func applyConfig(_ config: Config) {
         performOnRunLoop { [self] in
-            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer)
+            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
             self.applyActions(actions)
             self.config = config
             self.snapshot.keys = config.mappings.map {
@@ -131,7 +131,7 @@ public final class Engine: @unchecked Sendable {
     public func setEnabled(_ enabled: Bool) {
         performOnRunLoop { [self] in
             if self.snapshot.enabled == enabled { return }
-            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer)
+            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
             self.applyActions(actions)
             self.snapshot.enabled = enabled
         }
@@ -139,7 +139,7 @@ public final class Engine: @unchecked Sendable {
 
     public func clearStuck() {
         performOnRunLoop { [self] in
-            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer)
+            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
             self.applyActions(actions)
         }
     }
@@ -203,7 +203,7 @@ public final class Engine: @unchecked Sendable {
             MacapeLog.engine.error("tap disabled (type=\(type.rawValue)); re-enabling and resetting state")
             Task { await Metrics.shared.recordTapDisableRecovery() }
             if let tap = self.tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            let actions = HomeRowStateMachine.resetAll(snapshot: &snapshot, layer: config.layer)
+            let actions = HomeRowStateMachine.resetAll(snapshot: &snapshot, layer: config.layer, swaps: config.swaps)
             applyActions(actions)
             return Unmanaged.passUnretained(event)
         }
@@ -224,6 +224,7 @@ public final class Engine: @unchecked Sendable {
         let actions = HomeRowStateMachine.handleKeyEvent(
             snapshot: &snapshot,
             layer: config.layer,
+            swaps: config.swaps,
             keyCode: code,
             down: down,
             isRepeat: isRepeat,

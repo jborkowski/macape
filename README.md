@@ -57,11 +57,18 @@ j = left
 k = down
 l = up
 ; = right
+
+# Optional one-way key swaps (instant remap, no hold/tap delay)
+[swap]
+caps_lock = escape
+right_command = left_control
 ```
 
 **Modifier names** (case-insensitive): `lcmd rcmd cmd command lmet rmet`, `lalt ralt alt option opt`, `lctl rctl ctl ctrl control`, `lsft rsft sft shift`. Left/right is accepted but currently collapsed to the same flag mask — apps that distinguish sides won't see the difference.
 
-**Keycaps:** any letter `a–z`, plus `;` `'` `,` `.` `/` `[` `]` `\` `-` `=` `` ` `` and arrow aliases `left right up down`.
+**Keycaps:** any letter `a–z`, plus `;` `'` `,` `.` `/` `[` `]` `\` `-` `=` `` ` ``, arrow aliases `left right up down`, and special keys `escape esc caps_lock tab return delete backspace left_command right_command left_control right_control left_option right_option left_shift right_shift fn`.
+
+**Swaps:** add a `[swap]` section for instant one-way remaps (`source = target`). These run before home-row and layer logic — useful for `caps_lock = escape` or `right_command = left_control`. Swaps are not mutual; pressing the target key is unchanged.
 
 If the config file is missing, the built-in defaults above apply.
 
@@ -74,7 +81,7 @@ When you press a home-row key, macape doesn't commit yet — it parks the event 
 
 If you're already physically holding a real modifier (Cmd, Opt, Ctrl, Shift), macape gets out of the way so shortcuts like Cmd+A still work.
 
-Hold **Space** and press `j/k/l/;` to emit arrow keys (configurable via `[layer space]`).
+Hold **Space** and press `j/k/l/;` to emit arrow keys (configurable via `[layer space]`). While Space is held the layer always wins, so those keys never act as letters or home-row modifiers. The emitted arrows carry only real physical modifiers — synthetic home-row modifier flags are stripped, so a home-row Cmd won't turn into Cmd+Arrow; hold a real Cmd if you want Cmd+Arrow. Layer arrows use only real physical modifiers (Cmd/Opt/Ctrl/Shift you are actually holding), not synthetic home-row modifier flags — so `A(cmd)+space+j` becomes Left, not Cmd+Left; use a real Cmd for cmd+arrow.
 
 ## Stuck key recovery
 

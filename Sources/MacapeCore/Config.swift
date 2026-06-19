@@ -20,6 +20,18 @@ public struct Mapping: Sendable, Equatable {
     }
 }
 
+public struct SwapConfig: Sendable, Equatable {
+    public var mappings: [CGKeyCode: CGKeyCode]
+
+    public static let empty = SwapConfig(mappings: [:])
+
+    public init(mappings: [CGKeyCode: CGKeyCode]) {
+        self.mappings = mappings
+    }
+
+    public var enabled: Bool { !mappings.isEmpty }
+}
+
 public struct LayerConfig: Sendable, Equatable {
     public var holdKeyCode: CGKeyCode
     public var mappings: [CGKeyCode: CGKeyCode]
@@ -49,6 +61,7 @@ public struct Config: Sendable, Equatable {
     public var tcpPort: Int?
     public var mappings: [Mapping]
     public var layer: LayerConfig
+    public var swaps: SwapConfig
 
     public static let defaults = Config(
         holdTimeoutMs: 200,
@@ -65,7 +78,8 @@ public struct Config: Sendable, Equatable {
             Mapping(keyCode: 0x25, modifier: .maskAlternate),  // L
             Mapping(keyCode: 0x29, modifier: .maskCommand),    // ;
         ],
-        layer: .default
+        layer: .default,
+        swaps: .empty
     )
 
     public init(
@@ -74,7 +88,8 @@ public struct Config: Sendable, Equatable {
         maxModifierHoldMs: Int,
         tcpPort: Int?,
         mappings: [Mapping],
-        layer: LayerConfig
+        layer: LayerConfig,
+        swaps: SwapConfig = .empty
     ) {
         self.holdTimeoutMs = holdTimeoutMs
         self.tapTimeoutMs = tapTimeoutMs
@@ -82,6 +97,7 @@ public struct Config: Sendable, Equatable {
         self.tcpPort = tcpPort
         self.mappings = mappings
         self.layer = layer
+        self.swaps = swaps
     }
 
     public func holdTimeout(for mapping: Mapping) -> Int {
@@ -101,6 +117,14 @@ public struct Config: Sendable, Equatable {
         ";": 0x29, "'": 0x27, ",": 0x2B, ".": 0x2F, "/": 0x2C,
         "[": 0x21, "]": 0x1E, "\\": 0x2A, "-": 0x1B, "=": 0x18, "`": 0x32,
         "left": 123, "right": 124, "down": 125, "up": 126,
+        "escape": 53, "esc": 53,
+        "caps_lock": 57, "capslock": 57,
+        "tab": 48, "return": 36, "enter": 36, "delete": 51, "backspace": 51,
+        "left_command": 55, "right_command": 54,
+        "left_control": 59, "right_control": 62,
+        "left_option": 58, "right_option": 61,
+        "left_shift": 56, "right_shift": 60,
+        "fn": 63,
     ]
 
     private static let modifiers: [String: CGEventFlags] = [
@@ -127,7 +151,8 @@ public struct Config: Sendable, Equatable {
         var mappings: [Mapping] = []
         var layerHold: CGKeyCode = LayerConfig.default.holdKeyCode
         var layerMappings: [CGKeyCode: CGKeyCode] = LayerConfig.default.mappings
-        var inLayerSection = false
+        var swapMappings: [CGKeyCode: CGKeyCode] = [:]
+        var section: String? = nil
         var lineNo = 0
         var errors: [String] = []
 
@@ -137,8 +162,7 @@ public struct Config: Sendable, Equatable {
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
 
             if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
-                let section = trimmed.dropFirst().dropLast().trimmingCharacters(in: .whitespaces).lowercased()
-                inLayerSection = section == "layer space" || section == "layer"
+                section = trimmed.dropFirst().dropLast().trimmingCharacters(in: .whitespaces).lowercased()
                 continue
             }
 
@@ -151,7 +175,7 @@ public struct Config: Sendable, Equatable {
             let key = trimmed[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
             let val = trimmed[trimmed.index(after: eq)...].trimmingCharacters(in: .whitespaces).lowercased()
 
-            if inLayerSection {
+            if section == "layer space" || section == "layer" {
                 if key == "hold" {
                     if let kc = keycaps[val] {
                         layerHold = kc
@@ -175,6 +199,23 @@ public struct Config: Sendable, Equatable {
                     continue
                 }
                 layerMappings[src] = dst
+                continue
+            }
+
+            if section == "swap" || section == "swaps" {
+                guard let src = keycaps[key] else {
+                    let msg = "\(path):\(lineNo): unknown swap key '\(key)'"
+                    errors.append(msg)
+                    MacapeLog.err("macape: \(msg)")
+                    continue
+                }
+                guard let dst = keycaps[val] else {
+                    let msg = "\(path):\(lineNo): unknown swap target '\(val)'"
+                    errors.append(msg)
+                    MacapeLog.err("macape: \(msg)")
+                    continue
+                }
+                swapMappings[src] = dst
                 continue
             }
 
@@ -216,6 +257,7 @@ public struct Config: Sendable, Equatable {
 
         if mappings.isEmpty { mappings = defaults.mappings }
         let layer = LayerConfig(holdKeyCode: layerHold, mappings: layerMappings)
+        let swaps = SwapConfig(mappings: swapMappings)
         return (
             Config(
                 holdTimeoutMs: hold,
@@ -223,7 +265,8 @@ public struct Config: Sendable, Equatable {
                 maxModifierHoldMs: maxHold,
                 tcpPort: tcpPort,
                 mappings: mappings,
-                layer: layer
+                layer: layer,
+                swaps: swaps
             ),
             true,
             errors

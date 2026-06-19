@@ -25,3 +25,8 @@ j = left
 k = down
 l = up
 ; = right
+
+# Optional one-way key swaps (instant remap)
+[swap]
+caps_lock = escape
+right_command = left_control

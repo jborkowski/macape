@@ -58,6 +58,7 @@ public struct StateMachineSnapshot: Equatable, Sendable {
     public var layerDown: Bool
     public var layerConsumed: Bool
     public var layerOwnedKeys: Set<CGKeyCode>
+    public var swapOwnedKeys: Set<CGKeyCode>
     public var enabled: Bool
 
     public init(
@@ -66,6 +67,7 @@ public struct StateMachineSnapshot: Equatable, Sendable {
         layerDown: Bool = false,
         layerConsumed: Bool = false,
         layerOwnedKeys: Set<CGKeyCode> = [],
+        swapOwnedKeys: Set<CGKeyCode> = [],
         enabled: Bool = true
     ) {
         self.keys = keys
@@ -73,6 +75,7 @@ public struct StateMachineSnapshot: Equatable, Sendable {
         self.layerDown = layerDown
         self.layerConsumed = layerConsumed
         self.layerOwnedKeys = layerOwnedKeys
+        self.swapOwnedKeys = swapOwnedKeys
         self.enabled = enabled
     }
 }
@@ -88,15 +91,42 @@ public enum HomeRowStateMachine {
         }
     }
 
+    /// One-way remap target when this physical key has a swap binding.
+    public static func swapTarget(_ swaps: SwapConfig, _ keyCode: CGKeyCode) -> CGKeyCode? {
+        swaps.mappings[keyCode]
+    }
+
+    /// Mapped arrow keycode when the layer hold is active and this key has a layer binding.
+    public static func layerArrow(_ layer: LayerConfig, _ keyCode: CGKeyCode, layerDown: Bool) -> CGKeyCode? {
+        guard layerDown else { return nil }
+        return layer.mappings[keyCode]
+    }
+
+    private static func clearHomeRowState(snapshot: inout StateMachineSnapshot, at idx: Int) {
+        snapshot.keys[idx].state = .idle
+        snapshot.keys[idx].pressTimeMs = 0
+        snapshot.keys[idx].modifierSinceMs = 0
+    }
+
     public static func handleKeyEvent(
         snapshot: inout StateMachineSnapshot,
         layer: LayerConfig,
+        swaps: SwapConfig,
         keyCode: CGKeyCode,
         down: Bool,
         isRepeat: Bool,
         userMods: CGEventFlags,
         nowMs: UInt64
     ) -> [EngineAction] {
+        // Precedence (highest first):
+        // 1. Engine disabled -> pass through.
+        // 2. Instant key swap (one-way remap).
+        // 3. Layer hold key (space) press/release bookkeeping.
+        // 4. Active layer claim: layerDown + mapped key -> clean arrow (wins over home-row).
+        // 5. Real physical modifiers over a home-row key -> pass through.
+        // 6. Home-row tap/hold resolution.
+        // 7. Queue / pass through.
+
         guard snapshot.enabled else {
             let mods = activeModifiers(snapshot.keys)
             return mods.isEmpty ? [.passThrough(flags: [])] : [.passThrough(flags: mods)]
@@ -105,6 +135,21 @@ public enum HomeRowStateMachine {
         var actions: [EngineAction] = []
         let hrIdx = snapshot.keys.firstIndex(where: { $0.keyCode == keyCode })
 
+        // Tier 2: instant key swap
+        if let dst = swapTarget(swaps, keyCode) {
+            if down {
+                if isRepeat { return [.swallow] }
+                snapshot.swapOwnedKeys.insert(keyCode)
+                return [.postKey(dst, down: true, flags: userMods)]
+            }
+            if snapshot.swapOwnedKeys.contains(keyCode) {
+                snapshot.swapOwnedKeys.remove(keyCode)
+                return [.postKey(dst, down: false, flags: userMods)]
+            }
+            return [.swallow]
+        }
+
+        // Tier 3: layer hold key
         if keyCode == layer.holdKeyCode, userMods.isEmpty {
             if down {
                 if isRepeat { return [.swallow] }
@@ -126,22 +171,34 @@ public enum HomeRowStateMachine {
             return actions
         }
 
-        if snapshot.layerDown, down, let arrowCode = layer.mappings[keyCode] {
-            snapshot.layerConsumed = true
-            snapshot.layerOwnedKeys.insert(keyCode)
-            actions.append(.postKey(arrowCode, down: true, flags: userMods.union(activeModifiers(snapshot.keys))))
-            return actions
-        }
-        if !down, snapshot.layerOwnedKeys.contains(keyCode), let arrowCode = layer.mappings[keyCode] {
-            snapshot.layerOwnedKeys.remove(keyCode)
-            actions.append(.postKey(arrowCode, down: false, flags: userMods.union(activeModifiers(snapshot.keys))))
-            return actions
+        // Tier 4: active layer claim (supersedes home-row)
+        if let arrowCode = layerArrow(layer, keyCode, layerDown: snapshot.layerDown) {
+            if down {
+                snapshot.layerConsumed = true
+                snapshot.layerOwnedKeys.insert(keyCode)
+                if let idx = hrIdx, snapshot.keys[idx].state != .idle {
+                    clearHomeRowState(snapshot: &snapshot, at: idx)
+                }
+                actions.append(.postKey(arrowCode, down: true, flags: userMods))
+                return actions
+            }
+            if snapshot.layerOwnedKeys.contains(keyCode) {
+                snapshot.layerOwnedKeys.remove(keyCode)
+                actions.append(.postKey(arrowCode, down: false, flags: userMods))
+                return actions
+            }
+            if let idx = hrIdx, snapshot.keys[idx].state != .idle {
+                clearHomeRowState(snapshot: &snapshot, at: idx)
+            }
+            return [.swallow]
         }
 
+        // Tier 5: real physical modifiers over a home-row key
         if !userMods.isEmpty, hrIdx != nil {
             return [.passThrough(flags: userMods.union(activeModifiers(snapshot.keys)))]
         }
 
+        // Tier 6: home-row tap/hold resolution
         if let idx = hrIdx {
             if down {
                 if isRepeat { return [.swallow] }
@@ -185,6 +242,7 @@ public enum HomeRowStateMachine {
             }
         }
 
+        // Tier 7: queue / pass through
         if anyPending(snapshot.keys) {
             snapshot.queue.append(DefEvent(keycode: keyCode, down: down, flags: userMods))
             return [.swallow]
@@ -202,20 +260,6 @@ public enum HomeRowStateMachine {
         keyIsPhysicallyDown: (CGKeyCode) -> Bool
     ) -> [EngineAction] {
         var actions: [EngineAction] = []
-
-        if snapshot.layerDown, !keyIsPhysicallyDown(layer.holdKeyCode) {
-            actions.append(contentsOf: recoverLayerHold(snapshot: &snapshot, layer: layer, reason: "layer hold key up"))
-        }
-
-        for owned in snapshot.layerOwnedKeys {
-            if !keyIsPhysicallyDown(owned) {
-                if let arrow = layer.mappings[owned] {
-                    actions.append(.postKey(arrow, down: false, flags: activeModifiers(snapshot.keys)))
-                }
-                snapshot.layerOwnedKeys.remove(owned)
-                actions.append(.stuckRecovery(key: owned, reason: "layer key up"))
-            }
-        }
 
         var promotedPending = false
         for i in snapshot.keys.indices {
@@ -251,11 +295,17 @@ public enum HomeRowStateMachine {
         return changed ? flushQueue(snapshot: &snapshot) : []
     }
 
-    public static func resetAll(snapshot: inout StateMachineSnapshot, layer: LayerConfig) -> [EngineAction] {
+    public static func resetAll(snapshot: inout StateMachineSnapshot, layer: LayerConfig, swaps: SwapConfig) -> [EngineAction] {
         var actions: [EngineAction] = []
+        for owned in snapshot.swapOwnedKeys {
+            if let dst = swaps.mappings[owned] {
+                actions.append(.postKey(dst, down: false, flags: []))
+            }
+        }
+        snapshot.swapOwnedKeys.removeAll()
         for owned in snapshot.layerOwnedKeys {
             if let arrow = layer.mappings[owned] {
-                actions.append(.postKey(arrow, down: false, flags: activeModifiers(snapshot.keys)))
+                actions.append(.postKey(arrow, down: false, flags: []))
             }
         }
         snapshot.layerOwnedKeys.removeAll()
