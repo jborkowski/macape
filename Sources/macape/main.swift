@@ -1,22 +1,14 @@
 import Foundation
 import MacapeCore
 
-private final class Shutdown: @unchecked Sendable {
-    static let shared = Shutdown()
-    private var continuation: CheckedContinuation<Void, Never>?
+private final class SignalResumeBox: @unchecked Sendable {
+    private var didResume = false
 
-    func register(_ continuation: CheckedContinuation<Void, Never>) {
-        self.continuation = continuation
+    func resumeOnce(_ continuation: CheckedContinuation<Void, Never>) {
+        guard !didResume else { return }
+        didResume = true
+        continuation.resume()
     }
-
-    fileprivate func resume() {
-        continuation?.resume()
-        continuation = nil
-    }
-}
-
-private func macapeShutdownSignal(_ sig: Int32) {
-    Shutdown.shared.resume()
 }
 
 @main
@@ -121,13 +113,29 @@ enum MacapeMain {
         MacapeLog.err("macape: IPC socket at \(IPCPaths.socketPath)")
         MacapeLog.err("  Ctrl+C to quit.")
 
+        let runLoop = CFRunLoopGetMain()
+        let resumeBox = SignalResumeBox()
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+
+        let signalSources = [SIGINT, SIGTERM].map { sig in
+            DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        }
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            Shutdown.shared.register(continuation)
-            signal(SIGINT, macapeShutdownSignal)
-            signal(SIGTERM, macapeShutdownSignal)
+            for source in signalSources {
+                source.setEventHandler {
+                    resumeBox.resumeOnce(continuation)
+                    CFRunLoopStop(runLoop)
+                }
+                source.resume()
+            }
             CFRunLoopRun()
         }
 
+        for source in signalSources {
+            source.cancel()
+        }
         await server.stop()
     }
 
