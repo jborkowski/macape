@@ -14,7 +14,6 @@ public struct StatusSnapshot: Codable, Sendable, Equatable {
     public var enabled: Bool
     public var mappingCount: Int
     public var holdTimeoutMs: Int
-    public var tapTimeoutMs: Int
     public var layerEnabled: Bool
     public var stuckRecoveries: Int
     public var connectedClients: Int
@@ -23,7 +22,6 @@ public struct StatusSnapshot: Codable, Sendable, Equatable {
         enabled: Bool,
         mappingCount: Int,
         holdTimeoutMs: Int,
-        tapTimeoutMs: Int,
         layerEnabled: Bool,
         stuckRecoveries: Int,
         connectedClients: Int
@@ -31,7 +29,6 @@ public struct StatusSnapshot: Codable, Sendable, Equatable {
         self.enabled = enabled
         self.mappingCount = mappingCount
         self.holdTimeoutMs = holdTimeoutMs
-        self.tapTimeoutMs = tapTimeoutMs
         self.layerEnabled = layerEnabled
         self.stuckRecoveries = stuckRecoveries
         self.connectedClients = connectedClients

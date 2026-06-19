@@ -2,18 +2,6 @@ import Foundation
 import ApplicationServices
 import os
 
-private func nowMs() -> UInt64 {
-    var ts = timespec()
-    clock_gettime(CLOCK_MONOTONIC, &ts)
-    return UInt64(ts.tv_sec) * 1000 + UInt64(ts.tv_nsec) / 1_000_000
-}
-
-private func nowUs() -> UInt64 {
-    var ts = timespec()
-    clock_gettime(CLOCK_MONOTONIC, &ts)
-    return UInt64(ts.tv_sec) * 1_000_000 + UInt64(ts.tv_nsec) / 1000
-}
-
 private func describeFlags(_ flags: CGEventFlags) -> String {
     var names: [String] = []
     if flags.contains(.maskCommand) { names.append("cmd") }
@@ -66,7 +54,6 @@ public final class Engine: @unchecked Sendable {
     private let source: CGEventSource
     private var tap: CFMachPort?
     private let runLoop: CFRunLoop
-    private var signpostState: OSSignpostIntervalState?
 
     private init(config: Config) throws {
         self.config = config
@@ -74,8 +61,7 @@ public final class Engine: @unchecked Sendable {
             HRKey(
                 keyCode: $0.keyCode,
                 modifier: $0.modifier,
-                holdTimeoutMs: config.holdTimeout(for: $0),
-                tapTimeoutMs: config.tapTimeout(for: $0)
+                holdTimeoutMs: config.holdTimeout(for: $0)
             )
         })
         self.runLoop = CFRunLoopGetCurrent()
@@ -97,17 +83,13 @@ public final class Engine: @unchecked Sendable {
     }
 
     public func statusSnapshot(connectedClients: Int) -> StatusSnapshot {
-        Task {
-            let metrics = await Metrics.shared.snapshot()
-            _ = metrics
-        }
+        let metrics = Metrics.shared.snapshot()
         return StatusSnapshot(
             enabled: snapshot.enabled,
             mappingCount: config.mappings.count,
             holdTimeoutMs: config.holdTimeoutMs,
-            tapTimeoutMs: config.tapTimeoutMs,
             layerEnabled: config.layer.enabled,
-            stuckRecoveries: 0,
+            stuckRecoveries: Int(metrics.stuckRecoveries),
             connectedClients: connectedClients
         )
     }
@@ -121,8 +103,7 @@ public final class Engine: @unchecked Sendable {
                 HRKey(
                     keyCode: $0.keyCode,
                     modifier: $0.modifier,
-                    holdTimeoutMs: config.holdTimeout(for: $0),
-                    tapTimeoutMs: config.tapTimeout(for: $0)
+                    holdTimeoutMs: config.holdTimeout(for: $0)
                 )
             }
         }
@@ -170,7 +151,7 @@ public final class Engine: @unchecked Sendable {
         CFRunLoopAddSource(runLoop, rls, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
-        let interval: CFTimeInterval = 0.010
+        let interval: CFTimeInterval = 0.002
         let timer = CFRunLoopTimerCreateWithHandler(
             kCFAllocatorDefault,
             CFAbsoluteTimeGetCurrent() + interval,
@@ -183,16 +164,15 @@ public final class Engine: @unchecked Sendable {
     }
 
     fileprivate func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let start = nowUs()
+        let start = Clock.nowUs()
         defer {
-            let elapsed = nowUs() - start
-            Task {
-                await Metrics.shared.recordCallbackLatency(microseconds: elapsed)
-                if elapsed > 5000 {
-                    MacapeLog.perf.warning("slow callback \(elapsed)us")
-                }
+            // Measure processing duration only (epoch-agnostic). No Task hop.
+            let elapsed = Clock.nowUs() - start
+            Metrics.shared.recordCallbackLatency(microseconds: elapsed)
+            Metrics.shared.recordEvent()
+            if elapsed > 5000 {
+                MacapeLog.perf.warning("slow callback \(elapsed)us")
             }
-            Task { await Metrics.shared.recordEvent() }
         }
 
         if event.getIntegerValueField(.eventSourceUserData) == macapeSyntheticEventMarker {
@@ -201,7 +181,7 @@ public final class Engine: @unchecked Sendable {
 
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             MacapeLog.engine.error("tap disabled (type=\(type.rawValue)); re-enabling and resetting state")
-            Task { await Metrics.shared.recordTapDisableRecovery() }
+            Metrics.shared.recordTapDisableRecovery()
             if let tap = self.tap { CGEvent.tapEnable(tap: tap, enable: true) }
             let actions = HomeRowStateMachine.resetAll(snapshot: &snapshot, layer: config.layer, swaps: config.swaps)
             applyActions(actions)
@@ -217,11 +197,13 @@ public final class Engine: @unchecked Sendable {
         let existing = event.flags
         let userMods = existing.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-        let now = nowMs()
+        // Use the hardware event timestamp — accurate hold/tap durations even
+        // under variable callback delivery latency.
+        let now = Clock.eventMs(event)
 
         let beforeMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
         let beforeStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
-        let actions = HomeRowStateMachine.handleKeyEvent(
+        let outcome = HomeRowStateMachine.handleKeyEvent(
             snapshot: &snapshot,
             layer: config.layer,
             swaps: config.swaps,
@@ -233,31 +215,33 @@ public final class Engine: @unchecked Sendable {
         )
         let afterMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
         let afterStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
-        MacapeLog.debug("key code=0x\(String(code, radix: 16)) \(down ? "down" : "up") repeat=\(isRepeat) userMods=\(describeFlags(userMods)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) statesBefore=[\(beforeStates)] statesAfter=[\(afterStates)] actions=[\(describeActions(actions))]")
+        MacapeLog.debug("key code=0x\(String(code, radix: 16)) \(down ? "down" : "up") repeat=\(isRepeat) userMods=\(describeFlags(userMods)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) statesBefore=[\(beforeStates)] statesAfter=[\(afterStates)] actions=[\(describeActions(outcome.actions))]")
 
-        return applyHandleActions(actions, event: event, existing: existing)
+        return applyHandleActions(outcome, event: event, existing: existing)
     }
 
     private func tick() {
-        let now = nowMs()
-        let actions = HomeRowStateMachine.tick(
+        let now = Clock.nowMs()
+        let outcome = HomeRowStateMachine.tick(
             snapshot: &snapshot,
             layer: config.layer,
             maxModifierHoldMs: config.maxModifierHoldMs,
             nowMs: now,
             keyIsPhysicallyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) }
         )
-        applyActions(actions)
+        applyActions(outcome)
     }
 
     private func applyHandleActions(
-        _ actions: [EngineAction],
+        _ outcome: KeyEventOutcome,
         event: CGEvent,
         existing: CGEventFlags
     ) -> Unmanaged<CGEvent>? {
+        let actions = outcome.actions
         var passThrough = false
         var passFlags = existing
         var tapPosts = 0
+        var recoveries = 0
         for action in actions {
             switch action {
             case .postKey(let code, let down, let flags):
@@ -267,13 +251,24 @@ public final class Engine: @unchecked Sendable {
                 passThrough = true
                 passFlags = flags
             case .swallow:
-                recordTapBatch(tapPosts)
+                recordActionMetrics(
+                    taps: tapPosts,
+                    modifierPromotions: outcome.modifierPromotions,
+                    queueFlushes: outcome.queueFlushes,
+                    recoveries: recoveries
+                )
                 return nil
             case .stuckRecovery(let key, let reason):
                 emitStuck(key: key, reason: reason)
+                recoveries &+= 1
             }
         }
-        recordTapBatch(tapPosts)
+        recordActionMetrics(
+            taps: tapPosts,
+            modifierPromotions: outcome.modifierPromotions,
+            queueFlushes: outcome.queueFlushes,
+            recoveries: recoveries
+        )
         if passThrough {
             if !passFlags.isEmpty { event.flags = passFlags }
             return Unmanaged.passUnretained(event)
@@ -281,40 +276,43 @@ public final class Engine: @unchecked Sendable {
         return nil
     }
 
-    private func applyActions(_ actions: [EngineAction]) {
-        var promoted = false
-        for action in actions {
+    private func recordActionMetrics(
+        taps: Int,
+        modifierPromotions: Int,
+        queueFlushes: Int,
+        recoveries: Int
+    ) {
+        Metrics.shared.recordTap(count: taps)
+        if recoveries > 0 { Metrics.shared.recordStuckRecovery() }
+        if modifierPromotions > 0 { Metrics.shared.recordModifierPromotion(count: modifierPromotions) }
+        if queueFlushes > 0 { Metrics.shared.recordQueueFlush(count: queueFlushes) }
+    }
+
+    private func applyActions(_ outcome: KeyEventOutcome) {
+        var taps = 0
+        var recoveries = 0
+        for action in outcome.actions {
             switch action {
             case .postKey(let code, let down, let flags):
                 postKey(code, down: down, extra: flags)
+                taps &+= 1
             case .passThrough, .swallow:
                 break
             case .stuckRecovery(let key, let reason):
                 emitStuck(key: key, reason: reason)
-                Task { await Metrics.shared.recordStuckRecovery() }
+                recoveries &+= 1
             }
         }
-        if actions.contains(where: {
-            if case .postKey = $0 { return true }
-            return false
-        }) {
-            promoted = true
-        }
-        if promoted {
-            Task {
-                await Metrics.shared.recordModifierPromotion()
-                await Metrics.shared.recordQueueFlush()
-            }
-        }
+        recordActionMetrics(
+            taps: taps,
+            modifierPromotions: outcome.modifierPromotions,
+            queueFlushes: outcome.queueFlushes,
+            recoveries: recoveries
+        )
     }
 
-    private func recordTapBatch(_ count: Int) {
-        guard count > 0 else { return }
-        Task {
-            for _ in 0..<count {
-                await Metrics.shared.recordTap()
-            }
-        }
+    private func applyActions(_ actions: [EngineAction]) {
+        applyActions(KeyEventOutcome(actions: actions))
     }
 
     private func emitStuck(key: CGKeyCode, reason: String) {

@@ -2,10 +2,9 @@
 # Copy to ~/.config/macape/macape.conf and edit to taste.
 
 hold_timeout_ms = 200
-tap_timeout_ms  = 200
 max_modifier_hold_ms = 10000
 
-# Per-key override: key = modifier [hold_ms] [tap_ms]
+# Per-key override: key = modifier [hold_ms]
 # keycap = modifier
 #   modifiers: lcmd rcmd lalt ralt lctl rctl lsft rsft
 #              (also: cmd, alt, opt, ctl, ctrl, sft, shift, command, option, control)

@@ -140,7 +140,7 @@ enum MacapeMain {
     }
 
     private static func publish(engine: Engine, server: ControlServer, includeMetrics: Bool) async {
-        let metrics = await Metrics.shared.snapshot()
+        let metrics = Metrics.shared.snapshot()
         var status = engine.statusSnapshot(connectedClients: await server.clientCount)
         status.stuckRecoveries = Int(metrics.stuckRecoveries)
         await server.broadcast(.status(status))

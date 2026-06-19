@@ -38,10 +38,9 @@ Config file: `~/.config/macape/macape.conf` (INI-ish, `#` for comments).
 
 ```ini
 hold_timeout_ms = 200
-tap_timeout_ms  = 200
 max_modifier_hold_ms = 10000
 
-# Per-key override: key = modifier [hold_ms] [tap_ms]
+# Per-key override: key = modifier [hold_ms]
 A = lcmd 180
 S = lalt
 D = lctl
@@ -85,7 +84,7 @@ Hold **Space** and press `j/k/l/;` to emit arrow keys (configurable via `[layer 
 
 ## Stuck key recovery
 
-macape watches for desync between its internal state and the OS keyboard state (lost key-ups, tap timeouts, etc.). When detected, it force-releases modifiers and emits a `stuck` event. You can also trigger recovery manually via the menu bar or IPC `clearStuck`.
+macape watches for desync between its internal state and the OS keyboard state (lost key-ups, etc.). When detected, it force-releases modifiers and emits a `stuck` event. You can also trigger recovery manually via the menu bar or IPC `clearStuck`.
 
 ## IPC control
 

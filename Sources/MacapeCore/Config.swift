@@ -5,18 +5,15 @@ public struct Mapping: Sendable, Equatable {
     public let keyCode: CGKeyCode
     public let modifier: CGEventFlags
     public let holdTimeoutMs: Int?
-    public let tapTimeoutMs: Int?
 
     public init(
         keyCode: CGKeyCode,
         modifier: CGEventFlags,
-        holdTimeoutMs: Int? = nil,
-        tapTimeoutMs: Int? = nil
+        holdTimeoutMs: Int? = nil
     ) {
         self.keyCode = keyCode
         self.modifier = modifier
         self.holdTimeoutMs = holdTimeoutMs
-        self.tapTimeoutMs = tapTimeoutMs
     }
 }
 
@@ -56,7 +53,6 @@ public struct LayerConfig: Sendable, Equatable {
 
 public struct Config: Sendable, Equatable {
     public var holdTimeoutMs: Int
-    public var tapTimeoutMs: Int
     public var maxModifierHoldMs: Int
     public var tcpPort: Int?
     public var mappings: [Mapping]
@@ -65,7 +61,6 @@ public struct Config: Sendable, Equatable {
 
     public static let defaults = Config(
         holdTimeoutMs: 200,
-        tapTimeoutMs: 200,
         maxModifierHoldMs: 10_000,
         tcpPort: nil,
         mappings: [
@@ -84,7 +79,6 @@ public struct Config: Sendable, Equatable {
 
     public init(
         holdTimeoutMs: Int,
-        tapTimeoutMs: Int,
         maxModifierHoldMs: Int,
         tcpPort: Int?,
         mappings: [Mapping],
@@ -92,7 +86,6 @@ public struct Config: Sendable, Equatable {
         swaps: SwapConfig = .empty
     ) {
         self.holdTimeoutMs = holdTimeoutMs
-        self.tapTimeoutMs = tapTimeoutMs
         self.maxModifierHoldMs = maxModifierHoldMs
         self.tcpPort = tcpPort
         self.mappings = mappings
@@ -102,10 +95,6 @@ public struct Config: Sendable, Equatable {
 
     public func holdTimeout(for mapping: Mapping) -> Int {
         mapping.holdTimeoutMs ?? holdTimeoutMs
-    }
-
-    public func tapTimeout(for mapping: Mapping) -> Int {
-        mapping.tapTimeoutMs ?? tapTimeoutMs
     }
 
     private static let keycaps: [String: CGKeyCode] = [
@@ -145,7 +134,6 @@ public struct Config: Sendable, Equatable {
         }
 
         var hold = defaults.holdTimeoutMs
-        var tap = defaults.tapTimeoutMs
         var maxHold = defaults.maxModifierHoldMs
         var tcpPort: Int? = nil
         var mappings: [Mapping] = []
@@ -223,7 +211,9 @@ public struct Config: Sendable, Equatable {
             case "hold_timeout_ms":
                 if let n = Int(val), n > 0 { hold = n }
             case "tap_timeout_ms":
-                if let n = Int(val), n > 0 { tap = n }
+                let msg = "\(path):\(lineNo): tap_timeout_ms is deprecated and ignored"
+                errors.append(msg)
+                MacapeLog.err("macape: \(msg)")
             case "max_modifier_hold_ms":
                 if let n = Int(val), n > 0 { maxHold = n }
             case "tcp_port":
@@ -243,14 +233,16 @@ public struct Config: Sendable, Equatable {
                     continue
                 }
                 var perHold: Int? = nil
-                var perTap: Int? = nil
                 if parts.count > 1, let n = Int(parts[1]), n > 0 { perHold = n }
-                if parts.count > 2, let n = Int(parts[2]), n > 0 { perTap = n }
+                if parts.count > 2 {
+                    let msg = "\(path):\(lineNo): per-key tap timeout is deprecated and ignored"
+                    errors.append(msg)
+                    MacapeLog.err("macape: \(msg)")
+                }
                 mappings.append(Mapping(
                     keyCode: kc,
                     modifier: mod,
-                    holdTimeoutMs: perHold,
-                    tapTimeoutMs: perTap
+                    holdTimeoutMs: perHold
                 ))
             }
         }
@@ -261,7 +253,6 @@ public struct Config: Sendable, Equatable {
         return (
             Config(
                 holdTimeoutMs: hold,
-                tapTimeoutMs: tap,
                 maxModifierHoldMs: maxHold,
                 tcpPort: tcpPort,
                 mappings: mappings,

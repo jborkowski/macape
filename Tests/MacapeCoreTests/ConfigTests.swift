@@ -12,11 +12,10 @@ final class ConfigTests: XCTestCase {
         try text.write(toFile: path, atomically: true, encoding: .utf8)
         let (config, loaded, errors) = Config.load(from: path)
         XCTAssertTrue(loaded)
-        XCTAssertTrue(errors.isEmpty)
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors[0].contains("tap timeout is deprecated"))
         XCTAssertEqual(config.holdTimeout(for: config.mappings[0]), 150)
-        XCTAssertEqual(config.tapTimeout(for: config.mappings[0]), 200)
         XCTAssertEqual(config.holdTimeout(for: config.mappings[1]), 180)
-        XCTAssertEqual(config.tapTimeout(for: config.mappings[1]), 160)
     }
 
     func testLayerSection() throws {

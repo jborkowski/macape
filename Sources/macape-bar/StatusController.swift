@@ -10,7 +10,6 @@ final class StatusController: NSObject, NSMenuDelegate {
         enabled: true,
         mappingCount: 0,
         holdTimeoutMs: 200,
-        tapTimeoutMs: 200,
         layerEnabled: true,
         stuckRecoveries: 0,
         connectedClients: 0
