@@ -2,7 +2,7 @@ import AppKit
 import MacapeCore
 
 @MainActor
-final class StatusController {
+final class StatusController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let client = ControlClient()
     private var eventsTask: Task<Void, Never>?
@@ -28,8 +28,9 @@ final class StatusController {
     )
     private var connected = false
 
-    init() {
+    override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "macape")
         }
@@ -41,11 +42,19 @@ final class StatusController {
             guard let self else { return }
             let stream = await self.client.events()
             await self.client.start()
+            await self.refreshStats()
             for await event in stream {
                 self.handle(event)
             }
         }
-        Task { try? await self.client.send(.status) }
+    }
+
+    private func refreshStats() async {
+        try? await client.send(.status)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        Task { await refreshStats() }
     }
 
     func stop() {
@@ -105,6 +114,7 @@ final class StatusController {
         menu.addItem(withTitle: "Callback p99: \(metrics.callbackP99Us)us", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(actionItem(title: "Quit macape-bar", action: #selector(quit)))
+        menu.delegate = self
         statusItem.menu = menu
     }
 

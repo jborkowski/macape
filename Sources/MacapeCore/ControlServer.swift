@@ -172,11 +172,11 @@ public actor ControlClient {
         return stream
     }
 
-    public func start() {
+    public func start() async {
         MacapeLog.debug("ipc client start socket=\(socketPath)")
         shouldRun = true
         reconnectTask?.cancel()
-        reconnectTask = Task { await self.connectLoop() }
+        await connectLoop()
     }
 
     public func stop() {
