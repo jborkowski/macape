@@ -217,6 +217,7 @@ public enum HomeRowStateMachine {
             }
         }
 
+        var promotedPending = false
         for i in snapshot.keys.indices {
             let key = snapshot.keys[i]
             guard key.state != .idle else { continue }
@@ -236,7 +237,7 @@ public enum HomeRowStateMachine {
                nowMs - key.pressTimeMs >= UInt64(key.holdTimeoutMs) {
                 snapshot.keys[i].state = .modifier
                 snapshot.keys[i].modifierSinceMs = nowMs
-                actions.append(contentsOf: flushQueue(snapshot: &snapshot))
+                promotedPending = true
             } else if key.state == .modifier,
                       maxModifierHoldMs > 0,
                       nowMs - key.modifierSinceMs >= UInt64(maxModifierHoldMs) {
@@ -244,6 +245,9 @@ public enum HomeRowStateMachine {
                 snapshot.keys[i].modifierSinceMs = 0
                 actions.append(.stuckRecovery(key: key.keyCode, reason: "max modifier hold"))
             }
+        }
+        if promotedPending {
+            actions.append(contentsOf: flushQueue(snapshot: &snapshot))
         }
 
         return actions

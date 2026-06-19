@@ -224,13 +224,12 @@ public final class Engine: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
 
-        let promoteActions = HomeRowStateMachine.promotePendingModifiers(snapshot: &snapshot, nowMs: now)
+        let promoteActions = PointingEventModifier.applyHomeRowModifiers(
+            snapshot: &snapshot,
+            event: event,
+            nowMs: now
+        )
         applyActions(promoteActions)
-
-        let mods = HomeRowStateMachine.activeModifiers(snapshot.keys)
-        if !mods.isEmpty {
-            event.flags = event.flags.union(mods)
-        }
         return Unmanaged.passUnretained(event)
     }
 
