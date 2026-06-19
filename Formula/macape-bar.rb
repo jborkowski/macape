@@ -12,6 +12,7 @@ class MacapeBar < Formula
     system "swift", "build",
            "--configuration", "release",
            "--disable-sandbox",
+           "--product", "macape-bar",
            "-Xswiftc", "-Osize"
     bin.install ".build/release/macape-bar"
   end

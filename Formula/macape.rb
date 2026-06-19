@@ -11,9 +11,9 @@ class Macape < Formula
     system "swift", "build",
            "--configuration", "release",
            "--disable-sandbox",
+           "--product", "macape",
            "-Xswiftc", "-Osize"
     bin.install ".build/release/macape"
-    bin.install ".build/release/macape-bar"
 
     (etc/"macape").mkpath
     pkgshare.install "macape.conf.example"
