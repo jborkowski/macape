@@ -13,6 +13,7 @@ class Macape < Formula
            "--disable-sandbox",
            "-Xswiftc", "-Osize"
     bin.install ".build/release/macape"
+    bin.install ".build/release/macape-bar"
 
     (etc/"macape").mkpath
     pkgshare.install "macape.conf.example"
@@ -28,16 +29,22 @@ class Macape < Formula
            mkdir -p ~/.config/macape
            cp #{etc}/macape/macape.conf.example ~/.config/macape/macape.conf
 
-      2. Start it under launchd:
+      2. Start the daemon under launchd:
            brew services start macape
 
-      3. Grant Accessibility to the launched binary in:
+      3. Optional menu-bar controller (GUI session):
+           brew services start macape-bar
+
+      4. Grant Accessibility to the launched binary in:
            System Settings > Privacy & Security > Accessibility
          The path to allow:
            #{opt_bin}/macape
 
          Then:
            brew services restart macape
+
+      IPC socket: ~/.config/macape/macape.sock
+      Stats: macape --stats
     EOS
   end
 
@@ -46,6 +53,13 @@ class Macape < Formula
     keep_alive true
     log_path var/"log/macape.log"
     error_log_path var/"log/macape.log"
+  end
+
+  service "macape-bar" do
+    run [opt_bin/"macape-bar"]
+    keep_alive true
+    log_path var/"log/macape-bar.log"
+    error_log_path var/"log/macape-bar.log"
   end
 
   test do

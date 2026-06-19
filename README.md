@@ -17,6 +17,7 @@ First-install setup:
 mkdir -p ~/.config/macape
 cp "$(brew --prefix)/etc/macape/macape.conf.example" ~/.config/macape/macape.conf
 brew services start jborkowski/macape/macape
+brew services start jborkowski/macape/macape-bar
 ```
 
 Grant Accessibility to the launched binary:
@@ -27,16 +28,21 @@ Grant Accessibility to the launched binary:
 
 Logs live at `$(brew --prefix)/var/log/macape.log`.
 
+## Menu bar controller
+
+`macape-bar` is a separate menu-bar app that talks to the daemon over a local unix socket. Use it to enable/disable remapping, release stuck keys, reload config, and view live metrics.
+
 ## Configuration
 
 Config file: `~/.config/macape/macape.conf` (INI-ish, `#` for comments).
 
 ```ini
 hold_timeout_ms = 200
-tap_timeout_ms  = 200   # accepted for kanata parity; currently unused
+tap_timeout_ms  = 200
+max_modifier_hold_ms = 10000
 
-# keycap = modifier
-A = lcmd
+# Per-key override: key = modifier [hold_ms] [tap_ms]
+A = lcmd 180
 S = lalt
 D = lctl
 F = lsft
@@ -44,11 +50,18 @@ J = rsft
 K = rctl
 L = ralt
 ; = rcmd
+
+[layer space]
+hold = space
+j = left
+k = down
+l = up
+; = right
 ```
 
 **Modifier names** (case-insensitive): `lcmd rcmd cmd command lmet rmet`, `lalt ralt alt option opt`, `lctl rctl ctl ctrl control`, `lsft rsft sft shift`. Left/right is accepted but currently collapsed to the same flag mask — apps that distinguish sides won't see the difference.
 
-**Keycaps:** any letter `a–z`, plus `;` `'` `,` `.` `/` `[` `]` `\` `-` `=` `` ` ``.
+**Keycaps:** any letter `a–z`, plus `;` `'` `,` `.` `/` `[` `]` `\` `-` `=` `` ` `` and arrow aliases `left right up down`.
 
 If the config file is missing, the built-in defaults above apply.
 
@@ -61,24 +74,40 @@ When you press a home-row key, macape doesn't commit yet — it parks the event 
 
 If you're already physically holding a real modifier (Cmd, Opt, Ctrl, Shift), macape gets out of the way so shortcuts like Cmd+A still work.
 
+Hold **Space** and press `j/k/l/;` to emit arrow keys (configurable via `[layer space]`).
+
+## Stuck key recovery
+
+macape watches for desync between its internal state and the OS keyboard state (lost key-ups, tap timeouts, etc.). When detected, it force-releases modifiers and emits a `stuck` event. You can also trigger recovery manually via the menu bar or IPC `clearStuck`.
+
+## IPC control
+
+The daemon listens on `~/.config/macape/macape.sock` (newline-delimited JSON). Commands: `enable`, `disable`, `toggle`, `status`, `reload`, `metrics`, `clearStuck`.
+
+```bash
+macape --stats
+```
+
 ## Build from source
 
 ```bash
 swift build -c release
 .build/release/macape -c ./macape.conf.example
+.build/release/macape-bar
 ```
 
 Optional flags:
 
 - `-c <path>` — use a custom config file (overrides `~/.config/macape/macape.conf`).
+- `--stats` — print daemon status/metrics over IPC.
 - `-h`, `--help` — usage.
 
 ## Caveats
 
-- **Tap latency:** every home-row keypress is delayed until released or until `hold_timeout_ms` elapses. Typical typing taps are < 100 ms, so most people don't notice. If you do, lower `hold_timeout_ms` (say 150 ms).
+- **Tap latency:** every home-row keypress is delayed until released or until `hold_timeout_ms` elapses. Typical typing taps are < 100 ms, so most people don't notice. If you do, lower `hold_timeout_ms` (say 150 ms) or tune per-key.
 - **Accessibility is per-binary.** If you reinstall macape into a different path, re-grant.
 - **No left/right distinction yet.** Both `lcmd` and `rcmd` produce the same flag bits — fine for shortcuts, irrelevant for apps that care about handedness.
-- **Event taps can be disabled by macOS** if a callback takes too long. macape re-enables them automatically and logs the event.
+- **Event taps can be disabled by macOS** if a callback takes too long. macape re-enables them automatically, resets state, and logs the event.
 
 ## License
 

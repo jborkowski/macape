@@ -3,7 +3,9 @@
 
 hold_timeout_ms = 200
 tap_timeout_ms  = 200
+max_modifier_hold_ms = 10000
 
+# Per-key override: key = modifier [hold_ms] [tap_ms]
 # keycap = modifier
 #   modifiers: lcmd rcmd lalt ralt lctl rctl lsft rsft
 #              (also: cmd, alt, opt, ctl, ctrl, sft, shift, command, option, control)
@@ -15,3 +17,11 @@ J = rsft
 K = rctl
 L = ralt
 ; = rcmd
+
+# Optional arrow layer: hold space, press j/k/l/; for arrows
+[layer space]
+hold = space
+j = left
+k = down
+l = up
+; = right
