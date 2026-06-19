@@ -126,6 +126,11 @@ public final class Engine: @unchecked Sendable {
     private func install() throws {
         let bit: (CGEventType) -> CGEventMask = { CGEventMask(1) << CGEventMask($0.rawValue) }
         let mask = bit(.keyDown) | bit(.keyUp)
+            | bit(.leftMouseDown) | bit(.leftMouseUp)
+            | bit(.rightMouseDown) | bit(.rightMouseUp)
+            | bit(.otherMouseDown) | bit(.otherMouseUp)
+            | bit(.leftMouseDragged) | bit(.rightMouseDragged) | bit(.otherMouseDragged)
+            | bit(.scrollWheel)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
@@ -179,7 +184,7 @@ public final class Engine: @unchecked Sendable {
         }
 
         guard type == .keyDown || type == .keyUp else {
-            return Unmanaged.passUnretained(event)
+            return handlePointingEvent(type: type, event: event, now: nowMs())
         }
 
         let code: CGKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
@@ -212,6 +217,21 @@ public final class Engine: @unchecked Sendable {
             keyIsPhysicallyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) }
         )
         applyActions(actions)
+    }
+
+    private func handlePointingEvent(type: CGEventType, event: CGEvent, now: UInt64) -> Unmanaged<CGEvent>? {
+        guard snapshot.enabled else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let promoteActions = HomeRowStateMachine.promotePendingModifiers(snapshot: &snapshot, nowMs: now)
+        applyActions(promoteActions)
+
+        let mods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        if !mods.isEmpty {
+            event.flags = event.flags.union(mods)
+        }
+        return Unmanaged.passUnretained(event)
     }
 
     private func applyHandleActions(

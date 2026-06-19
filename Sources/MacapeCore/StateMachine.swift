@@ -146,10 +146,6 @@ public enum HomeRowStateMachine {
             if down {
                 if isRepeat { return [.swallow] }
                 if snapshot.keys[idx].state != .idle { return [.swallow] }
-                if anyPending(snapshot.keys) {
-                    snapshot.queue.append(DefEvent(keycode: keyCode, down: true, flags: []))
-                    return [.swallow]
-                }
                 snapshot.keys[idx].state = .pending
                 snapshot.keys[idx].pressTimeMs = nowMs
                 return [.swallow]
@@ -164,16 +160,15 @@ public enum HomeRowStateMachine {
                     return [.swallow]
                 }
 
-                var batch: [DefEvent] = [
-                    DefEvent(keycode: keyCode, down: true, flags: []),
-                    DefEvent(keycode: keyCode, down: false, flags: []),
-                ]
-                batch.append(contentsOf: snapshot.queue)
-                snapshot.queue.removeAll(keepingCapacity: true)
                 snapshot.keys[idx].state = .idle
                 let mods = activeModifiers(snapshot.keys)
-                for e in batch {
-                    actions.append(.postKey(e.keycode, down: e.down, flags: e.flags.union(mods)))
+                actions.append(.postKey(keyCode, down: true, flags: mods))
+                actions.append(.postKey(keyCode, down: false, flags: mods))
+                if !anyPending(snapshot.keys) {
+                    for e in snapshot.queue {
+                        actions.append(.postKey(e.keycode, down: e.down, flags: e.flags.union(mods)))
+                    }
+                    snapshot.queue.removeAll(keepingCapacity: true)
                 }
                 return actions
 
@@ -252,6 +247,16 @@ public enum HomeRowStateMachine {
         }
 
         return actions
+    }
+
+    public static func promotePendingModifiers(snapshot: inout StateMachineSnapshot, nowMs: UInt64) -> [EngineAction] {
+        var changed = false
+        for i in snapshot.keys.indices where snapshot.keys[i].state == .pending {
+            snapshot.keys[i].state = .modifier
+            snapshot.keys[i].modifierSinceMs = nowMs
+            changed = true
+        }
+        return changed ? flushQueue(snapshot: &snapshot) : []
     }
 
     public static func resetAll(snapshot: inout StateMachineSnapshot, layer: LayerConfig) -> [EngineAction] {
