@@ -33,6 +33,7 @@ class Macape < Formula
            brew services start macape
 
       3. Optional menu-bar controller (GUI session):
+           brew install jborkowski/macape/macape-bar
            brew services start macape-bar
 
       4. Grant Accessibility to the launched binary in:
@@ -53,13 +54,6 @@ class Macape < Formula
     keep_alive true
     log_path var/"log/macape.log"
     error_log_path var/"log/macape.log"
-  end
-
-  service "macape-bar" do
-    run [opt_bin/"macape-bar"]
-    keep_alive true
-    log_path var/"log/macape-bar.log"
-    error_log_path var/"log/macape-bar.log"
   end
 
   test do
