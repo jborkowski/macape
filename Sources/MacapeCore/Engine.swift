@@ -38,6 +38,8 @@ private func describeActions(_ actions: [EngineAction]) -> String {
     }.joined(separator: ",")
 }
 
+private let macapeSyntheticEventMarker: Int64 = 0x6d6163617065
+
 private let tapCallback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
     let engine = Unmanaged<Engine>.fromOpaque(refcon).takeUnretainedValue()
@@ -193,6 +195,10 @@ public final class Engine: @unchecked Sendable {
             Task { await Metrics.shared.recordEvent() }
         }
 
+        if event.getIntegerValueField(.eventSourceUserData) == macapeSyntheticEventMarker {
+            return Unmanaged.passUnretained(event)
+        }
+
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             MacapeLog.engine.error("tap disabled (type=\(type.rawValue)); re-enabling and resetting state")
             Task { await Metrics.shared.recordTapDisableRecovery() }
@@ -318,6 +324,7 @@ public final class Engine: @unchecked Sendable {
 
     private func postKey(_ code: CGKeyCode, down: Bool, extra: CGEventFlags) {
         guard let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
+        e.setIntegerValueField(.eventSourceUserData, value: macapeSyntheticEventMarker)
         e.flags = e.flags.union(extra)
         e.post(tap: .cgSessionEventTap)
     }
