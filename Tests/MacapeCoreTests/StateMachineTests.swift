@@ -207,11 +207,52 @@ final class StateMachineTests: XCTestCase {
         var snapshot = StateMachineSnapshot(keys: [])
         let swaps = SwapConfig(mappings: [54: 59]) // right_command -> left_control
 
+        // With no other modifiers held, the synthetic control event carries the
+        // target's own flag (.maskControl), set from the keycode.
         let down = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54, down: true, nowMs: 1000)
-        XCTAssertEqual(down, [.postKey(59, down: true, flags: [])])
+        XCTAssertEqual(down, [.postKey(59, down: true, flags: .maskControl)])
 
         let up = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54, down: false, nowMs: 1010)
-        XCTAssertEqual(up, [.postKey(59, down: false, flags: [])])
+        XCTAssertEqual(up, [.postKey(59, down: false, flags: .maskControl)])
+    }
+
+    func testSwapModifierStripsSourceFlagAndKeepsOthers() {
+        // The reported bug: right_command -> left_control leaked cmd because the
+        // source modifier's own flag (present in event.flags) was carried onto
+        // the synthetic event. The fix strips the source flag while preserving
+        // any *other* real modifiers held.
+        var snapshot = StateMachineSnapshot(keys: [])
+        let swaps = SwapConfig(mappings: [54: 59]) // right_command -> left_control
+
+        // right_command pressed alone: event carries .maskCommand (its own flag).
+        // Result must be control ONLY (cmd stripped, control added).
+        let solo = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54,
+                          down: true, userMods: .maskCommand, nowMs: 1000)
+        XCTAssertEqual(solo, [.postKey(59, down: true, flags: .maskControl)])
+        XCTAssertFalse(solo.contains { if case .postKey(_, _, let f) = $0 { return f.contains(.maskCommand) }; return false })
+
+        // right_command pressed while physical shift is also held: shift must be
+        // preserved, cmd stripped, control added -> shift + control.
+        let chord = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54,
+                           down: false, userMods: [.maskCommand, .maskShift], nowMs: 1010)
+        XCTAssertEqual(chord, [.postKey(59, down: false, flags: [.maskControl, .maskShift])])
+    }
+
+    func testSwapEventFlagsHelper() {
+        // Direct unit coverage of the flag-resolution helper.
+        XCTAssertEqual(
+            HomeRowStateMachine.swapEventFlags(source: 54, target: 59, userMods: .maskCommand),
+            .maskControl
+        )
+        XCTAssertEqual(
+            HomeRowStateMachine.swapEventFlags(source: 54, target: 59, userMods: [.maskCommand, .maskShift]),
+            [.maskControl, .maskShift]
+        )
+        // Non-modifier swap (caps_lock -> escape): flags pass through unchanged.
+        XCTAssertEqual(
+            HomeRowStateMachine.swapEventFlags(source: 57, target: 53, userMods: .maskShift),
+            .maskShift
+        )
     }
 
     func testResetAllClearsSwapOwnedKeys() {

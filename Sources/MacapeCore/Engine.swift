@@ -132,17 +132,36 @@ public final class Engine: @unchecked Sendable {
 
     private func install() throws {
         let bit: (CGEventType) -> CGEventMask = { CGEventMask(1) << CGEventMask($0.rawValue) }
-        let mask = bit(.keyDown) | bit(.keyUp)
+        // Subscribe to flagsChanged too: macOS delivers modifier-key presses
+        // (cmd/opt/ctrl/shift) as flagsChanged, not keyDown/keyUp. Without it,
+        // swapping a modifier (e.g. right_command -> left_control) is invisible
+        // to the tap. We only act on flagsChanged for swapped modifier keys;
+        // everything else passes through untouched.
+        let mask = bit(.keyDown) | bit(.keyUp) | bit(.flagsChanged)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: tapCallback,
-            userInfo: refcon
-        ) else {
+
+        // CGEventTapCreate can transiently fail right after install/rebuild
+        // while the system re-evaluates the Accessibility grant for the new
+        // binary signature. A short bounded retry recovers the transient case
+        // without masking a genuine permission denial (which still fails and
+        // surfaces the clear grant-instructions error).
+        var tap: CFMachPort?
+        let attempts = 6
+        for attempt in 1...attempts {
+            tap = CGEvent.tapCreate(
+                tap: .cghidEventTap,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: mask,
+                callback: tapCallback,
+                userInfo: refcon
+            )
+            if tap != nil { break }
+            MacapeLog.engine.error("CGEventTapCreate failed (attempt \(attempt)/\(attempts)); retrying in 0.5s")
+            if attempt < attempts { usleep(500_000) }
+        }
+        guard let tap else {
             throw StartError.tapCreate
         }
         self.tap = tap
@@ -188,15 +207,32 @@ public final class Engine: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
 
-        guard type == .keyDown || type == .keyUp else {
+        guard type == .keyDown || type == .keyUp || type == .flagsChanged else {
             return Unmanaged.passUnretained(event)
         }
 
         let code: CGKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        let down = (type == .keyDown)
         let existing = event.flags
         let userMods = existing.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
-        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+
+        // Modifier keys arrive as flagsChanged. Only intercept them when they
+        // are a swapped modifier (and macape is enabled); every other
+        // flagsChanged passes through untouched so real modifiers behave
+        // normally. Derive press/release from whether the modifier's flag is set.
+        let down: Bool
+        let isRepeat: Bool
+        if type == .flagsChanged {
+            guard snapshot.enabled,
+                  config.swaps.mappings[code] != nil,
+                  let flag = HomeRowStateMachine.modifierKeyFlags[code] else {
+                return Unmanaged.passUnretained(event)
+            }
+            down = existing.contains(flag)
+            isRepeat = false
+        } else {
+            down = (type == .keyDown)
+            isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        }
         // Use the hardware event timestamp — accurate hold/tap durations even
         // under variable callback delivery latency.
         let now = Clock.eventMs(event)

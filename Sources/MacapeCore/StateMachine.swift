@@ -157,6 +157,41 @@ public enum HomeRowStateMachine {
         swaps.mappings[keyCode]
     }
 
+    /// Physical modifier keycodes -> the flag bit each one sets.
+    ///
+    /// macOS delivers modifier presses as `flagsChanged` events (not
+    /// keyDown/keyUp), and the source modifier's own flag is already present in
+    /// `event.flags` by the time we see it. When swapping a modifier
+    /// (e.g. right_command -> left_control) we must NOT carry the source's own
+    /// flag onto the synthetic target event, or it bleeds through (you'd get
+    /// cmd+control instead of control). This map lets the swap tier strip the
+    /// source flag and set the target flag precisely. It is also what the Engine
+    /// uses to derive press/release from a `flagsChanged` event.
+    public static let modifierKeyFlags: [CGKeyCode: CGEventFlags] = [
+        54: .maskCommand, 55: .maskCommand,   // right / left command
+        59: .maskControl, 62: .maskControl,   // left / right control
+        58: .maskAlternate, 61: .maskAlternate, // left / right option
+        56: .maskShift, 60: .maskShift,         // left / right shift
+    ]
+
+    /// Resolve flags for a synthetic swap event: keep other real modifiers, drop
+    /// the source modifier's own flag, and add the target's own flag (so a
+    /// modifier target is reported as held on the emitted event).
+    public static func swapEventFlags(
+        source keyCode: CGKeyCode,
+        target dst: CGKeyCode,
+        userMods: CGEventFlags
+    ) -> CGEventFlags {
+        var flags = userMods
+        if let sourceFlag = modifierKeyFlags[keyCode] {
+            flags.subtract(sourceFlag)
+        }
+        if let targetFlag = modifierKeyFlags[dst] {
+            flags.formUnion(targetFlag)
+        }
+        return flags
+    }
+
     /// Mapped arrow keycode when the layer hold is active and this key has a layer binding.
     public static func layerArrow(_ layer: LayerConfig, _ keyCode: CGKeyCode, layerDown: Bool) -> CGKeyCode? {
         guard layerDown else { return nil }
@@ -223,14 +258,18 @@ public enum HomeRowStateMachine {
 
         // Tier 2: instant key swap
         if let dst = swapTarget(swaps, keyCode) {
+            // Strip the source modifier's own flag and set the target's so a
+            // modifier-to-modifier swap (e.g. right_command -> left_control)
+            // does not bleed the source flag onto the synthetic event.
+            let swapFlags = swapEventFlags(source: keyCode, target: dst, userMods: userMods)
             if down {
                 if isRepeat { return outcome([.swallow]) }
                 snapshot.swapOwnedKeys.insert(keyCode)
-                return outcome([.postKey(dst, down: true, flags: userMods)])
+                return outcome([.postKey(dst, down: true, flags: swapFlags)])
             }
             if snapshot.swapOwnedKeys.contains(keyCode) {
                 snapshot.swapOwnedKeys.remove(keyCode)
-                return outcome([.postKey(dst, down: false, flags: userMods)])
+                return outcome([.postKey(dst, down: false, flags: swapFlags)])
             }
             return outcome([.swallow])
         }
