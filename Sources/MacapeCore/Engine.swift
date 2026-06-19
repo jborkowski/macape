@@ -14,6 +14,30 @@ private func nowUs() -> UInt64 {
     return UInt64(ts.tv_sec) * 1_000_000 + UInt64(ts.tv_nsec) / 1000
 }
 
+private func describeFlags(_ flags: CGEventFlags) -> String {
+    var names: [String] = []
+    if flags.contains(.maskCommand) { names.append("cmd") }
+    if flags.contains(.maskAlternate) { names.append("opt") }
+    if flags.contains(.maskControl) { names.append("ctrl") }
+    if flags.contains(.maskShift) { names.append("shift") }
+    return names.isEmpty ? "none" : names.joined(separator: "+")
+}
+
+private func describeActions(_ actions: [EngineAction]) -> String {
+    actions.map { action in
+        switch action {
+        case .postKey(let code, let down, let flags):
+            return "postKey(0x\(String(code, radix: 16)),\(down ? "down" : "up"),flags=\(describeFlags(flags)))"
+        case .passThrough(let flags):
+            return "passThrough(flags=\(describeFlags(flags)))"
+        case .swallow:
+            return "swallow"
+        case .stuckRecovery(let key, let reason):
+            return "stuck(0x\(String(key, radix: 16)),\(reason))"
+        }
+    }.joined(separator: ",")
+}
+
 private let tapCallback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
     let engine = Unmanaged<Engine>.fromOpaque(refcon).takeUnretainedValue()
@@ -194,6 +218,8 @@ public final class Engine: @unchecked Sendable {
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let now = nowMs()
 
+        let beforeMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        let beforeStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
         let actions = HomeRowStateMachine.handleKeyEvent(
             snapshot: &snapshot,
             layer: config.layer,
@@ -203,6 +229,9 @@ public final class Engine: @unchecked Sendable {
             userMods: userMods,
             nowMs: now
         )
+        let afterMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        let afterStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
+        MacapeLog.debug("key code=0x\(String(code, radix: 16)) \(down ? "down" : "up") repeat=\(isRepeat) userMods=\(describeFlags(userMods)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) statesBefore=[\(beforeStates)] statesAfter=[\(afterStates)] actions=[\(describeActions(actions))]")
 
         return applyHandleActions(actions, event: event, existing: existing)
     }
@@ -224,11 +253,16 @@ public final class Engine: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
 
+        let beforeFlags = event.flags
+        let beforeMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        let beforeStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
         let promoteActions = PointingEventModifier.applyHomeRowModifiers(
             snapshot: &snapshot,
             event: event,
             nowMs: now
         )
+        let afterMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        MacapeLog.debug("pointing type=\(type.rawValue) flagsBefore=\(describeFlags(beforeFlags)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) flagsAfter=\(describeFlags(event.flags)) statesBefore=[\(beforeStates)] actions=[\(describeActions(promoteActions))]")
         applyActions(promoteActions)
         return Unmanaged.passUnretained(event)
     }

@@ -173,6 +173,7 @@ public actor ControlClient {
     }
 
     public func start() {
+        MacapeLog.debug("ipc client start socket=\(socketPath)")
         shouldRun = true
         reconnectTask?.cancel()
         reconnectTask = Task { await self.connectLoop() }
@@ -188,15 +189,21 @@ public actor ControlClient {
     }
 
     public func send(_ command: IPCCommand) async throws {
-        guard let connection else { throw ControlClientError.disconnected }
+        guard let connection else {
+            MacapeLog.debug("ipc send \(command) failed: disconnected")
+            throw ControlClientError.disconnected
+        }
+        MacapeLog.debug("ipc send \(command)")
         let envelope = IPCCommandEnvelope(command: command)
         var data = try JSONEncoder().encode(envelope)
         data.append(0x0A)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {
+                    MacapeLog.debug("ipc send \(command) failed: \(error.localizedDescription)")
                     continuation.resume(throwing: error)
                 } else {
+                    MacapeLog.debug("ipc send \(command) ok")
                     continuation.resume()
                 }
             })
@@ -206,10 +213,13 @@ public actor ControlClient {
     private func connectLoop() async {
         while shouldRun {
             do {
+                MacapeLog.debug("ipc connect attempt socket=\(socketPath)")
                 try await connectOnce()
+                MacapeLog.debug("ipc connect ready socket=\(socketPath)")
                 return
             } catch {
                 MacapeLog.ipc.error("connect failed: \(error.localizedDescription, privacy: .public)")
+                MacapeLog.debug("ipc connect failed socket=\(socketPath) error=\(error.localizedDescription)")
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
@@ -217,7 +227,6 @@ public actor ControlClient {
 
     private func connectOnce() async throws {
         let connection = NWConnection(to: NWEndpoint.unix(path: socketPath), using: .tcp)
-        self.connection = connection
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             final class ResumeBox: @unchecked Sendable {
@@ -240,6 +249,7 @@ public actor ControlClient {
             connection.start(queue: .global(qos: .userInitiated))
         }
 
+        self.connection = connection
         receiveLoop(on: connection)
     }
 
@@ -261,6 +271,7 @@ public actor ControlClient {
             }
         }
         if error != nil || isComplete {
+            MacapeLog.debug("ipc receive ended complete=\(isComplete) error=\(error?.localizedDescription ?? "none")")
             connection.cancel()
             self.connection = nil
             if shouldRun {
