@@ -25,26 +25,23 @@ class Macape < Formula
 
   def caveats
     <<~EOS
-      macape needs Accessibility permission to intercept key events.
+      First-time setup:
 
-      1. First-install only — copy the example config:
+      1. Copy the example config:
            mkdir -p ~/.config/macape
            cp #{etc}/macape/macape.conf.example ~/.config/macape/macape.conf
 
-      2. Start the daemon under launchd:
-           brew services start macape
-
-      3. Optional menu-bar controller (GUI session):
-           brew install jborkowski/macape/macape-bar
-           brew services start macape-bar
-
-      4. Grant Accessibility to the launched binary in:
+      2. Grant Accessibility in:
            System Settings > Privacy & Security > Accessibility
-         The path to allow:
+         Add this binary:
            #{opt_bin}/macape
 
-         Then:
-           brew services restart macape
+      3. Start the daemon:
+           brew services start macape
+
+      4. (Optional) Menu-bar controller:
+           brew install jborkowski/macape/macape-bar
+           brew services start macape-bar
 
       IPC socket: ~/.config/macape/macape.sock
       Stats: macape --stats

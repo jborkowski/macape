@@ -17,10 +17,11 @@ First-install setup:
 mkdir -p ~/.config/macape
 cp "$(brew --prefix)/etc/macape/macape.conf.example" ~/.config/macape/macape.conf
 brew services start jborkowski/macape/macape
-brew services start jborkowski/macape/macape-bar
 ```
 
-Grant Accessibility to the launched binary:
+### Granting Accessibility
+
+macape needs Accessibility permission to intercept key events. Grant it once:
 
 1. Open **System Settings → Privacy & Security → Accessibility**.
 2. Add `$(brew --prefix)/opt/macape/bin/macape`.
@@ -28,9 +29,14 @@ Grant Accessibility to the launched binary:
 
 Logs live at `$(brew --prefix)/var/log/macape.log`.
 
-## Menu bar controller
+### Optional: Menu bar controller
 
-`macape-bar` is a separate menu-bar app that talks to the daemon over a local unix socket. Use it to enable/disable remapping, release stuck keys, reload config, and view live metrics.
+`macape-bar` is a separate menu-bar app that talks to the daemon over a local unix socket. Install it if you want a GUI to enable/disable remapping, release stuck keys, reload config, and view live metrics.
+
+```bash
+brew install --HEAD jborkowski/macape/macape-bar
+brew services start jborkowski/macape/macape-bar
+```
 
 ## Configuration
 
@@ -73,10 +79,12 @@ If the config file is missing, the built-in defaults above apply.
 
 ## How it works
 
-When you press a home-row key, macape doesn't commit yet — it parks the event in a small queue. Two things can happen:
+When you press a home-row key, macape doesn't commit yet — it parks the event in a deferred buffer. Hold/tap timing uses **hardware event timestamps** (`CGEvent.timestamp` in the mach-absolute clock domain), not callback wall time, so the configured `hold_timeout_ms` boundary is accurate regardless of OS delivery latency.
 
-- **You release the key before `hold_timeout_ms`** → it was a tap. The original letter is emitted, followed by anything that piled up in the queue (fast rollover stays correct).
-- **You keep holding past the timeout** → it's promoted to a modifier. The queue is flushed with the modifier flag applied, and subsequent keys are flagged in-flight until release.
+Each pending key gets a **deadline** (`press time + hold_timeout_ms`). A one-shot timer fires at that deadline for isolated holds; every subsequent key event also advances the clock first. Two outcomes:
+
+- **You release the key before the deadline** → it was a tap. The letter is replayed (with its original timestamp), followed by anything that piled up in the buffer.
+- **You keep holding past the deadline** → it's promoted to a modifier. The buffer is flushed with the modifier flag applied, and subsequent keys are flagged in-flight until release.
 
 If you're already physically holding a real modifier (Cmd, Opt, Ctrl, Shift), macape gets out of the way so shortcuts like Cmd+A still work.
 
@@ -84,7 +92,9 @@ Hold **Space** and press `j/k/l/;` to emit arrow keys (configurable via `[layer 
 
 ## Stuck key recovery
 
-macape watches for desync between its internal state and the OS keyboard state (lost key-ups, etc.). When detected, it force-releases modifiers and emits a `stuck` event. You can also trigger recovery manually via the menu bar or IPC `clearStuck`.
+macape watches for desync between its internal state and the OS keyboard state (lost key-ups, modifiers held past `max_modifier_hold_ms`, etc.). When detected, it force-releases modifiers and emits a `stuck` event. You can also trigger recovery manually via IPC `clearStuck`.
+
+On **system wake** (lid open, resume from sleep), macape resets all virtual modifier/buffer state and re-enables the event tap — key-up events are often lost across sleep, and hold/tap clocks (`mach_absolute_time`) pause while asleep so stale timers must not fire on wake.
 
 ## IPC control
 
@@ -99,6 +109,12 @@ macape --stats
 ```bash
 swift build -c release
 .build/release/macape -c ./macape.conf.example
+```
+
+To also build the optional menu-bar controller:
+
+```bash
+swift build -c release --product macape-bar
 .build/release/macape-bar
 ```
 
@@ -109,6 +125,8 @@ Optional flags:
 - `-h`, `--help` — usage.
 
 ## Caveats
+
+> macape-bar is entirely optional — the daemon runs standalone without it.
 
 - **Tap latency:** every home-row keypress is delayed until released or until `hold_timeout_ms` elapses. Typical typing taps are < 100 ms, so most people don't notice. If you do, lower `hold_timeout_ms` (say 150 ms) or tune per-key.
 - **Accessibility is per-binary.** If you reinstall macape into a different path, re-grant.

@@ -5,11 +5,17 @@ import ApplicationServices
 ///
 /// macOS reports hardware key event times via `CGEvent.timestamp`, which is a
 /// mach-absolute timestamp. To measure hold/tap durations *accurately* we must:
-///   1. stamp `HRKey.pressTimeMs` from the key-down event's `.timestamp`, and
+///   1. stamp `HRKey.pressMach` from the key-down event's `.timestamp`, and
 ///   2. compute `held` from the key-up event's `.timestamp`,
 /// using the *same* mach→ms conversion for both, and the same conversion for
-/// the run-loop timer's `nowMs()`. This keeps the whole state machine on one
-/// clock domain regardless of how late the OS delivered each callback.
+/// deadline timers. This keeps the whole state machine on one clock domain
+/// regardless of how late the OS delivered each callback.
+///
+/// **Sleep behaviour:** `mach_absolute_time()` (and therefore `CGEvent.timestamp`)
+/// does *not* advance while the system is asleep. Hold/tap deadlines therefore
+/// pause during sleep — a key held across sleep does not spuriously promote.
+/// Do not schedule deadlines with wall-clock timers (`CFAbsoluteTime`); they
+/// diverge from mach time across sleep/wake. Use `DeadlineScheduler` instead.
 ///
 /// These helpers are public so that tests can exercise the real
 /// `CGEvent → ms → state-machine` path end-to-end with the *production*
@@ -58,5 +64,12 @@ public enum Clock {
     /// real key event.
     public static func eventMs(_ event: CGEvent) -> UInt64 {
         machToMs(event.timestamp)
+    }
+
+    /// Nanoseconds between two mach-absolute timestamps (`end &- start`).
+    public static func machDeltaToNanoseconds(_ deltaMach: UInt64) -> UInt64 {
+        let ns = deltaMach.multipliedReportingOverflow(by: UInt64(timebase.numer))
+        guard !ns.overflow else { return UInt64.max }
+        return ns.partialValue / UInt64(timebase.denom)
     }
 }

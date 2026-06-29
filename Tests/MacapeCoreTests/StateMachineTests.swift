@@ -8,7 +8,7 @@ final class StateMachineTests: XCTestCase {
     }
 
     private func handle(
-        snapshot: inout StateMachineSnapshot,
+        snapshot: inout PipelineSnapshot,
         layer: LayerConfig = .default,
         swaps: SwapConfig = .empty,
         keyCode: CGKeyCode,
@@ -17,7 +17,7 @@ final class StateMachineTests: XCTestCase {
         userMods: CGEventFlags = [],
         nowMs: UInt64
     ) -> [EngineAction] {
-        HomeRowStateMachine.handleKeyEvent(
+        Pipeline.handleKeyEvent(
             snapshot: &snapshot,
             layer: layer,
             swaps: swaps,
@@ -29,8 +29,28 @@ final class StateMachineTests: XCTestCase {
         ).actions
     }
 
+    private func drive(
+        snapshot: inout PipelineSnapshot,
+        layer: LayerConfig = .default,
+        swaps: SwapConfig = .empty,
+        keyCode: CGKeyCode,
+        down: Bool,
+        isRepeat: Bool = false,
+        userMods: CGEventFlags = [],
+        nowMs: UInt64
+    ) -> KeyEventOutcome {
+        let frame = EventFrame(
+            machTime: Clock.msToMach(nowMs),
+            keyCode: keyCode,
+            down: down,
+            flags: userMods,
+            isRepeat: isRepeat
+        )
+        return Pipeline.drive(snapshot: &snapshot, layer: layer, swaps: swaps, frame: frame)
+    }
+
     func testTapEmitsOnRelease() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00)])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
         let actions = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1100)
         XCTAssertEqual(actions.count, 2)
@@ -38,9 +58,9 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testHoldPromotesOnTick() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00, hold: 100)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100)])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
-        let actions = HomeRowStateMachine.tick(
+        let actions = Pipeline.tick(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             maxModifierHoldMs: 10_000,
@@ -55,14 +75,14 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testMultipleHomeRowKeysCanPromoteTogether() {
-        var snapshot = StateMachineSnapshot(keys: [
+        var snapshot = PipelineSnapshot(keys: [
             key(0x00, modifier: .maskCommand, hold: 100),
             key(0x01, modifier: .maskAlternate, hold: 100),
         ])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
         _ = handle(snapshot: &snapshot, keyCode: 0x01, down: true, nowMs: 1010)
 
-        _ = HomeRowStateMachine.tick(
+        _ = Pipeline.tick(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             maxModifierHoldMs: 10_000,
@@ -72,11 +92,11 @@ final class StateMachineTests: XCTestCase {
 
         XCTAssertEqual(snapshot.keys[0].state, .modifier)
         XCTAssertEqual(snapshot.keys[1].state, .modifier)
-        XCTAssertEqual(HomeRowStateMachine.activeModifiers(snapshot.keys), [.maskCommand, .maskAlternate])
+        XCTAssertEqual(Pipeline.activeModifiers(snapshot.keys), [.maskCommand, .maskAlternate])
     }
 
     func testSpaceLayerEmitsArrowAndReleasesIt() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00)])
 
         let spaceDown = handle(snapshot: &snapshot, keyCode: 49, down: true, nowMs: 1000)
         XCTAssertEqual(spaceDown, [.swallow])
@@ -84,13 +104,13 @@ final class StateMachineTests: XCTestCase {
 
         let jDown = handle(snapshot: &snapshot, keyCode: 38, down: true, nowMs: 1010)
         XCTAssertTrue(jDown.contains(where: {
-            if case .postKey(123, down: true, _) = $0 { return true }
+            if case .postKey(123, down: true, _, _) = $0 { return true }
             return false
         }))
 
         let jUp = handle(snapshot: &snapshot, keyCode: 38, down: false, nowMs: 1020)
         XCTAssertTrue(jUp.contains(where: {
-            if case .postKey(123, down: false, _) = $0 { return true }
+            if case .postKey(123, down: false, _, _) = $0 { return true }
             return false
         }))
 
@@ -100,8 +120,8 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testSpaceLayerDoesNotUsePhysicalKeyStateToCancelSwallowedSpace() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00)], layerDown: true)
-        _ = HomeRowStateMachine.tick(
+        var snapshot = PipelineSnapshot(keys: [key(0x00)], layerDown: true)
+        _ = Pipeline.tick(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             maxModifierHoldMs: 10_000,
@@ -112,15 +132,15 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testModifierStuckRecoveryUsesMaxHoldTimeout() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00)])
         snapshot.keys[0].state = .modifier
-        snapshot.keys[0].modifierSinceMs = 1000
-        let actions = HomeRowStateMachine.tick(
+        snapshot.keys[0].modifierSinceMach = Clock.msToMach(1000)
+        let actions = Pipeline.tick(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             maxModifierHoldMs: 500,
             nowMs: 1600,
-            keyIsPhysicallyDown: { _ in false }
+            keyIsPhysicallyDown: { _ in true }
         ).actions
         XCTAssertEqual(snapshot.keys[0].state, .idle)
         XCTAssertTrue(actions.contains(where: {
@@ -129,14 +149,32 @@ final class StateMachineTests: XCTestCase {
         }))
     }
 
+    func testModifierStuckRecoveryOnPhysicalKeyUpDesync() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00)])
+        snapshot.keys[0].state = .modifier
+        snapshot.keys[0].modifierSinceMach = Clock.msToMach(1000)
+        let actions = Pipeline.tick(
+            snapshot: &snapshot,
+            layer: LayerConfig.default,
+            maxModifierHoldMs: 10_000,
+            nowMs: 1100,
+            keyIsPhysicallyDown: { _ in false }
+        ).actions
+        XCTAssertEqual(snapshot.keys[0].state, .idle)
+        XCTAssertTrue(actions.contains(where: {
+            if case .stuckRecovery(_, let reason) = $0 { return reason.contains("desync") }
+            return false
+        }))
+    }
+
     func testResetAllClearsLayerOwnedKeys() {
-        var snapshot = StateMachineSnapshot(
+        var snapshot = PipelineSnapshot(
             keys: [key(0x00)],
             layerDown: true,
             layerOwnedKeys: [38]
         )
         snapshot.keys[0].state = .modifier
-        let actions = HomeRowStateMachine.resetAll(
+        let actions = Pipeline.resetAll(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             swaps: .empty
@@ -145,19 +183,19 @@ final class StateMachineTests: XCTestCase {
         XCTAssertFalse(snapshot.layerDown)
         XCTAssertEqual(snapshot.keys[0].state, .idle)
         XCTAssertTrue(actions.contains(where: {
-            if case .postKey(123, down: false, _) = $0 { return true }
+            if case .postKey(123, down: false, _, _) = $0 { return true }
             return false
         }))
     }
 
     func testLayerArrowStripsHomeRowModifiers() {
-        var snapshot = StateMachineSnapshot(keys: [key(40, modifier: .maskControl)])
+        var snapshot = PipelineSnapshot(keys: [key(40, modifier: .maskControl)])
         snapshot.keys[0].state = .modifier
 
         _ = handle(snapshot: &snapshot, keyCode: 49, down: true, nowMs: 1000)
         let actions = handle(snapshot: &snapshot, keyCode: 40, down: true, nowMs: 1010)
         XCTAssertTrue(actions.contains(where: {
-            if case .postKey(125, down: true, let flags) = $0 {
+            if case .postKey(125, down: true, let flags, _) = $0 {
                 return !flags.contains(.maskControl)
             }
             return false
@@ -165,7 +203,7 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testReverseRolloverSwallowedWhenLayerActive() {
-        var snapshot = StateMachineSnapshot(keys: [key(38)])
+        var snapshot = PipelineSnapshot(keys: [key(38)])
 
         let jDown = handle(snapshot: &snapshot, keyCode: 38, down: true, nowMs: 1000)
         XCTAssertEqual(jDown, [.swallow])
@@ -183,7 +221,7 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testLayerClaimClearsHomeRowState() {
-        var snapshot = StateMachineSnapshot(keys: [key(38)])
+        var snapshot = PipelineSnapshot(keys: [key(38)])
 
         _ = handle(snapshot: &snapshot, keyCode: 49, down: true, nowMs: 1000)
         _ = handle(snapshot: &snapshot, keyCode: 38, down: true, nowMs: 1010)
@@ -191,143 +229,121 @@ final class StateMachineTests: XCTestCase {
     }
 
     func testSwapEmitsTargetKey() {
-        var snapshot = StateMachineSnapshot(keys: [])
-        let swaps = SwapConfig(mappings: [57: 53]) // caps_lock -> escape
+        var snapshot = PipelineSnapshot(keys: [])
+        let swaps = SwapConfig(mappings: [57: 53])
 
         let down = handle(snapshot: &snapshot, swaps: swaps, keyCode: 57, down: true, nowMs: 1000)
-        XCTAssertEqual(down, [.postKey(53, down: true, flags: [])])
+        XCTAssertEqual(down, [.postKey(53, down: true, flags: [], machTime: Clock.msToMach(1000))])
         XCTAssertTrue(snapshot.swapOwnedKeys.contains(57))
 
         let up = handle(snapshot: &snapshot, swaps: swaps, keyCode: 57, down: false, nowMs: 1010)
-        XCTAssertEqual(up, [.postKey(53, down: false, flags: [])])
+        XCTAssertEqual(up, [.postKey(53, down: false, flags: [], machTime: Clock.msToMach(1010))])
         XCTAssertFalse(snapshot.swapOwnedKeys.contains(57))
     }
 
     func testSwapModifierKey() {
-        var snapshot = StateMachineSnapshot(keys: [])
-        let swaps = SwapConfig(mappings: [54: 59]) // right_command -> left_control
+        var snapshot = PipelineSnapshot(keys: [])
+        let swaps = SwapConfig(mappings: [54: 59])
 
-        // With no other modifiers held, the synthetic control event carries the
-        // target's own flag (.maskControl), set from the keycode.
         let down = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54, down: true, nowMs: 1000)
-        XCTAssertEqual(down, [.postKey(59, down: true, flags: .maskControl)])
+        XCTAssertEqual(down, [.postKey(59, down: true, flags: .maskControl, machTime: Clock.msToMach(1000))])
 
         let up = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54, down: false, nowMs: 1010)
-        XCTAssertEqual(up, [.postKey(59, down: false, flags: .maskControl)])
+        XCTAssertEqual(up, [.postKey(59, down: false, flags: .maskControl, machTime: Clock.msToMach(1010))])
     }
 
     func testSwapModifierStripsSourceFlagAndKeepsOthers() {
-        // The reported bug: right_command -> left_control leaked cmd because the
-        // source modifier's own flag (present in event.flags) was carried onto
-        // the synthetic event. The fix strips the source flag while preserving
-        // any *other* real modifiers held.
-        var snapshot = StateMachineSnapshot(keys: [])
-        let swaps = SwapConfig(mappings: [54: 59]) // right_command -> left_control
+        var snapshot = PipelineSnapshot(keys: [])
+        let swaps = SwapConfig(mappings: [54: 59])
 
-        // right_command pressed alone: event carries .maskCommand (its own flag).
-        // Result must be control ONLY (cmd stripped, control added).
         let solo = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54,
                           down: true, userMods: .maskCommand, nowMs: 1000)
-        XCTAssertEqual(solo, [.postKey(59, down: true, flags: .maskControl)])
-        XCTAssertFalse(solo.contains { if case .postKey(_, _, let f) = $0 { return f.contains(.maskCommand) }; return false })
+        XCTAssertEqual(solo, [.postKey(59, down: true, flags: .maskControl, machTime: Clock.msToMach(1000))])
+        XCTAssertFalse(solo.contains { if case .postKey(_, _, let f, _) = $0 { return f.contains(.maskCommand) }; return false })
 
-        // right_command pressed while physical shift is also held: shift must be
-        // preserved, cmd stripped, control added -> shift + control.
         let chord = handle(snapshot: &snapshot, swaps: swaps, keyCode: 54,
                            down: false, userMods: [.maskCommand, .maskShift], nowMs: 1010)
-        XCTAssertEqual(chord, [.postKey(59, down: false, flags: [.maskControl, .maskShift])])
+        XCTAssertEqual(chord, [.postKey(59, down: false, flags: [.maskControl, .maskShift], machTime: Clock.msToMach(1010))])
     }
 
     func testSwapEventFlagsHelper() {
-        // Direct unit coverage of the flag-resolution helper.
         XCTAssertEqual(
-            HomeRowStateMachine.swapEventFlags(source: 54, target: 59, userMods: .maskCommand),
+            FeatureRouter.swapEventFlags(source: 54, target: 59, userMods: .maskCommand),
             .maskControl
         )
         XCTAssertEqual(
-            HomeRowStateMachine.swapEventFlags(source: 54, target: 59, userMods: [.maskCommand, .maskShift]),
+            FeatureRouter.swapEventFlags(source: 54, target: 59, userMods: [.maskCommand, .maskShift]),
             [.maskControl, .maskShift]
         )
-        // Non-modifier swap (caps_lock -> escape): flags pass through unchanged.
         XCTAssertEqual(
-            HomeRowStateMachine.swapEventFlags(source: 57, target: 53, userMods: .maskShift),
+            FeatureRouter.swapEventFlags(source: 57, target: 53, userMods: .maskShift),
             .maskShift
         )
     }
 
     func testResetAllClearsSwapOwnedKeys() {
-        var snapshot = StateMachineSnapshot(keys: [], swapOwnedKeys: [57])
+        var snapshot = PipelineSnapshot(keys: [], swapOwnedKeys: [57])
         let swaps = SwapConfig(mappings: [57: 53])
 
-        let actions = HomeRowStateMachine.resetAll(
+        let actions = Pipeline.resetAll(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             swaps: swaps
         )
         XCTAssertTrue(snapshot.swapOwnedKeys.isEmpty)
         XCTAssertTrue(actions.contains(where: {
-            if case .postKey(53, down: false, _) = $0 { return true }
+            if case .postKey(53, down: false, _, _) = $0 { return true }
             return false
         }))
     }
 
-    // MARK: - Reap (authoritative event-driven promotion)
-
     func testReapPromotesExpiredPendingAndLeavesUnexpiredAlone() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00, hold: 100)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100)])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
 
-        // Before timeout: no promotion.
-        let early = HomeRowStateMachine.reapPendingModifiers(snapshot: &snapshot, nowMs: 1050)
+        let early = Pipeline.reapPendingModifiers(snapshot: &snapshot, nowMs: 1050)
         XCTAssertEqual(snapshot.keys[0].state, .pending)
         XCTAssertTrue(early.actions.isEmpty)
 
-        // At/after timeout: promote, and flush the (empty) queue.
-        let onTime = HomeRowStateMachine.reapPendingModifiers(snapshot: &snapshot, nowMs: 1100)
+        let onTime = Pipeline.reapPendingModifiers(snapshot: &snapshot, nowMs: 1100)
         XCTAssertEqual(snapshot.keys[0].state, .modifier)
-        XCTAssertTrue(onTime.actions.isEmpty) // empty queue → no emitted actions
+        XCTAssertTrue(onTime.actions.isEmpty)
     }
 
     func testReapNoOpOnIdleAndModifier() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00, hold: 100), key(0x01, hold: 100)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100), key(0x01, hold: 100)])
         snapshot.keys[1].state = .modifier
-        snapshot.keys[1].modifierSinceMs = 1000
+        snapshot.keys[1].modifierSinceMach = Clock.msToMach(1000)
 
-        let actions = HomeRowStateMachine.reapPendingModifiers(snapshot: &snapshot, nowMs: 99_999)
+        let actions = Pipeline.reapPendingModifiers(snapshot: &snapshot, nowMs: 99_999)
         XCTAssertEqual(snapshot.keys[0].state, .idle)
         XCTAssertEqual(snapshot.keys[1].state, .modifier)
         XCTAssertTrue(actions.actions.isEmpty)
     }
 
-    func testReapFlushesQueueWithModifierOnPromotion() {
-        var snapshot = StateMachineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 100)])
+    func testReapFlushesBufferWithModifierOnPromotion() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 100)])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
-        // Non-home-row key pressed while pending -> queued.
-        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1050) // 'e'
-        XCTAssertEqual(snapshot.queue.count, 1)
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1050)
+        XCTAssertEqual(snapshot.buffer.count, 1)
 
-        let actions = HomeRowStateMachine.reapPendingModifiers(snapshot: &snapshot, nowMs: 1100)
+        let actions = Pipeline.reapPendingModifiers(snapshot: &snapshot, nowMs: 1100)
         XCTAssertEqual(snapshot.keys[0].state, .modifier)
-        XCTAssertTrue(snapshot.queue.isEmpty)
+        XCTAssertTrue(snapshot.buffer.isEmpty)
         XCTAssertTrue(actions.actions.contains(where: {
-            if case .postKey(0x0E, down: true, let flags) = $0 { return flags.contains(.maskCommand) }
+            if case .postKey(0x0E, down: true, let flags, _) = $0 { return flags.contains(.maskCommand) }
             return false
         }))
     }
 
-    // MARK: - Hold/tap boundary (Problem A + B)
-
     func testHoldTapBoundaryIsSharpAtConfiguredTimeout() {
-        // The fix measures duration from hardware event timestamps, so the
-        // boundary lands exactly at the configured timeout regardless of when
-        // the OS delivered the callbacks.
         for hold in stride(from: 50, through: 350, by: 5) {
-            var snapshot = StateMachineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 200)])
+            var snapshot = PipelineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 200)])
             _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
             let actions = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1000 + UInt64(hold))
 
             let emittedLetter = actions.contains(where: {
-                if case .postKey(0x00, _, _) = $0 { return true }
+                if case .postKey(0x00, _, _, _) = $0 { return true }
                 return false
             })
             if hold < 200 {
@@ -340,36 +356,26 @@ final class StateMachineTests: XCTestCase {
         }
     }
 
-    // MARK: - Release-at-timeout race (Problem D regression)
-
     func testReleaseAtTimeoutDoesNotDropModifierOrStrandQueue() {
-        // Before the fix, releasing exactly at the timeout with no intervening
-        // timer tick hit a branch that swallowed the key and left the queue
-        // stranded (queued key-up emitted with no matching key-down, and the
-        // intended modifier silently lost).
-        var snapshot = StateMachineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 200)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 200)])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
-        // Queue a non-home-row key while A is pending.
-        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1100) // 'e'
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1100)
 
-        // Release exactly at the timeout, WITHOUT a tick in between.
         let actions = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1200)
 
-        // Reap-on-release promotes A and flushes the queue with cmd applied.
         XCTAssertTrue(actions.contains(where: {
-            if case .postKey(0x0E, down: true, let flags) = $0 { return flags.contains(.maskCommand) }
+            if case .postKey(0x0E, down: true, let flags, _) = $0 { return flags.contains(.maskCommand) }
             return false
         }), "queued 'e' must be emitted with the cmd modifier; got \(actions)")
         XCTAssertEqual(snapshot.keys[0].state, .idle)
-        XCTAssertTrue(snapshot.queue.isEmpty)
+        XCTAssertTrue(snapshot.buffer.isEmpty)
     }
 
     func testTickStillActsAsSafetyNetForIsolatedHold() {
-        // A key held with no further events must still promote via the timer.
-        var snapshot = StateMachineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 100)])
+        var snapshot = PipelineSnapshot(keys: [key(0x00, modifier: .maskCommand, hold: 100)])
         _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
 
-        _ = HomeRowStateMachine.tick(
+        _ = Pipeline.tick(
             snapshot: &snapshot,
             layer: LayerConfig.default,
             maxModifierHoldMs: 10_000,
@@ -377,5 +383,92 @@ final class StateMachineTests: XCTestCase {
             keyIsPhysicallyDown: { _ in true }
         )
         XCTAssertEqual(snapshot.keys[0].state, .modifier)
+    }
+
+    // MARK: - New pipeline regression tests
+
+    func testTwoPendingHomeRowKeysBufferFlushesWhenBothResolve() {
+        var snapshot = PipelineSnapshot(keys: [
+            key(0x00, modifier: .maskCommand, hold: 100),
+            key(0x01, modifier: .maskAlternate, hold: 100),
+        ])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = handle(snapshot: &snapshot, keyCode: 0x01, down: true, nowMs: 1010)
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1020)
+        XCTAssertEqual(snapshot.buffer.count, 1)
+
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1050)
+        XCTAssertEqual(snapshot.buffer.count, 1, "buffer must wait for S to resolve")
+
+        let sUp = handle(snapshot: &snapshot, keyCode: 0x01, down: false, nowMs: 1060)
+        XCTAssertTrue(snapshot.buffer.isEmpty)
+        XCTAssertTrue(sUp.contains(where: {
+            if case .postKey(0x0E, down: true, _, _) = $0 { return true }
+            return false
+        }))
+    }
+
+    func testTimerOnlyPromotionWithNoInterveningEvents() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100)])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+
+        let outcome = Pipeline.advanceTime(
+            snapshot: &snapshot,
+            maxModifierHoldMs: 10_000,
+            nowMach: Clock.msToMach(1200),
+            keyIsPhysicallyDown: { _ in true }
+        )
+        XCTAssertEqual(snapshot.keys[0].state, .modifier)
+        XCTAssertEqual(outcome.modifierPromotions, 1)
+    }
+
+    func testBufferedReplayPreservesMachTimestamp() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 200)])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1050)
+
+        let actions = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1100)
+        let eAction = actions.first(where: {
+            if case .postKey(0x0E, _, _, _) = $0 { return true }
+            return false
+        })
+        guard case .postKey(_, _, _, let machTime?) = eAction else {
+            return XCTFail("expected buffered e with mach timestamp; got \(String(describing: eAction))")
+        }
+        XCTAssertEqual(Clock.machToMs(machTime), 1050)
+    }
+
+    func testPerKeyTimeoutBoundariesAreIndependent() {
+        var snapshot = PipelineSnapshot(keys: [
+            key(0x00, modifier: .maskCommand, hold: 180),
+            key(0x01, modifier: .maskAlternate, hold: 200),
+        ])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = handle(snapshot: &snapshot, keyCode: 0x01, down: true, nowMs: 1000)
+
+        let aUp = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1179)
+        XCTAssertTrue(aUp.contains(where: { if case .postKey(0x00, _, _, _) = $0 { return true }; return false }))
+
+        let bUp = handle(snapshot: &snapshot, keyCode: 0x01, down: false, nowMs: 1199)
+        XCTAssertTrue(bUp.contains(where: { if case .postKey(0x01, _, _, _) = $0 { return true }; return false }))
+
+        var holdSnapshot = PipelineSnapshot(keys: [
+            key(0x00, modifier: .maskCommand, hold: 180),
+            key(0x01, modifier: .maskAlternate, hold: 200),
+        ])
+        _ = handle(snapshot: &holdSnapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = handle(snapshot: &holdSnapshot, keyCode: 0x01, down: true, nowMs: 1000)
+        let aHold = handle(snapshot: &holdSnapshot, keyCode: 0x00, down: false, nowMs: 1180)
+        XCTAssertFalse(aHold.contains(where: { if case .postKey(0x00, _, _, _) = $0 { return true }; return false }))
+    }
+
+    func testPipelineDriveMatchesHandleKeyEvent() {
+        var snapshotA = PipelineSnapshot(keys: [key(0x00)])
+        var snapshotB = PipelineSnapshot(keys: [key(0x00)])
+
+        let outcomeA = drive(snapshot: &snapshotA, keyCode: 0x00, down: true, nowMs: 1000)
+        let outcomeB = handle(snapshot: &snapshotB, keyCode: 0x00, down: true, nowMs: 1000)
+        XCTAssertEqual(outcomeA.actions, outcomeB)
+        XCTAssertEqual(snapshotA, snapshotB)
     }
 }

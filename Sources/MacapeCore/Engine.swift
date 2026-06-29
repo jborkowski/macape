@@ -14,7 +14,7 @@ private func describeFlags(_ flags: CGEventFlags) -> String {
 private func describeActions(_ actions: [EngineAction]) -> String {
     actions.map { action in
         switch action {
-        case .postKey(let code, let down, let flags):
+        case .postKey(let code, let down, let flags, _):
             return "postKey(0x\(String(code, radix: 16)),\(down ? "down" : "up"),flags=\(describeFlags(flags)))"
         case .passThrough(let flags):
             return "passThrough(flags=\(describeFlags(flags)))"
@@ -25,8 +25,6 @@ private func describeActions(_ actions: [EngineAction]) -> String {
         }
     }.joined(separator: ",")
 }
-
-private let macapeSyntheticEventMarker: Int64 = 0x6d6163617065
 
 private let tapCallback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
@@ -50,14 +48,15 @@ public final class Engine: @unchecked Sendable {
     public var onEvent: (@Sendable (DaemonEvent) -> Void)?
 
     private var config: Config
-    private var snapshot: StateMachineSnapshot
+    private var snapshot: PipelineSnapshot
     private let source: CGEventSource
     private var tap: CFMachPort?
+    private let deadlineScheduler = DeadlineScheduler()
     private let runLoop: CFRunLoop
 
     private init(config: Config) throws {
         self.config = config
-        self.snapshot = StateMachineSnapshot(keys: config.mappings.map {
+        self.snapshot = PipelineSnapshot(keys: config.mappings.map {
             HRKey(
                 keyCode: $0.keyCode,
                 modifier: $0.modifier,
@@ -96,7 +95,7 @@ public final class Engine: @unchecked Sendable {
 
     public func applyConfig(_ config: Config) {
         performOnRunLoop { [self] in
-            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
+            let actions = Pipeline.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
             self.applyActions(actions)
             self.config = config
             self.snapshot.keys = config.mappings.map {
@@ -106,22 +105,51 @@ public final class Engine: @unchecked Sendable {
                     holdTimeoutMs: config.holdTimeout(for: $0)
                 )
             }
+            self.rescheduleDeadlineTimer()
         }
     }
 
     public func setEnabled(_ enabled: Bool) {
         performOnRunLoop { [self] in
             if self.snapshot.enabled == enabled { return }
-            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
+            let actions = Pipeline.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
             self.applyActions(actions)
             self.snapshot.enabled = enabled
+            self.rescheduleDeadlineTimer()
         }
     }
 
     public func clearStuck() {
         performOnRunLoop { [self] in
-            let actions = HomeRowStateMachine.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
+            let actions = Pipeline.resetAll(snapshot: &self.snapshot, layer: self.config.layer, swaps: self.config.swaps)
             self.applyActions(actions)
+            self.rescheduleDeadlineTimer()
+        }
+    }
+
+    /// Called when macOS resumes from sleep. Resets virtual modifier/buffer
+    /// state (key-ups are often lost across sleep) and re-enables the event tap.
+    public func handleSystemWake() {
+        performOnRunLoop { [self] in
+            MacapeLog.engine.info("system wake: resetting pipeline state")
+            if let tap = self.tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            let actions = Pipeline.resetAll(
+                snapshot: &self.snapshot,
+                layer: self.config.layer,
+                swaps: self.config.swaps,
+                reason: "system wake"
+            )
+            self.applyActions(actions)
+            self.rescheduleDeadlineTimer()
+        }
+    }
+
+    /// Called before macOS sleeps. Cancels the mach-aligned deadline timer so a
+    /// stale wall-clock callback cannot fire on wake before the next key event.
+    public func handleSystemWillSleep() {
+        performOnRunLoop { [self] in
+            MacapeLog.engine.info("system will sleep: cancelling deadline timer")
+            self.deadlineScheduler.cancel()
         }
     }
 
@@ -132,20 +160,10 @@ public final class Engine: @unchecked Sendable {
 
     private func install() throws {
         let bit: (CGEventType) -> CGEventMask = { CGEventMask(1) << CGEventMask($0.rawValue) }
-        // Subscribe to flagsChanged too: macOS delivers modifier-key presses
-        // (cmd/opt/ctrl/shift) as flagsChanged, not keyDown/keyUp. Without it,
-        // swapping a modifier (e.g. right_command -> left_control) is invisible
-        // to the tap. We only act on flagsChanged for swapped modifier keys;
-        // everything else passes through untouched.
         let mask = bit(.keyDown) | bit(.keyUp) | bit(.flagsChanged)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
 
-        // CGEventTapCreate can transiently fail right after install/rebuild
-        // while the system re-evaluates the Accessibility grant for the new
-        // binary signature. A short bounded retry recovers the transient case
-        // without masking a genuine permission denial (which still fails and
-        // surfaces the clear grant-instructions error).
         var tap: CFMachPort?
         let attempts = 6
         for attempt in 1...attempts {
@@ -169,23 +187,11 @@ public final class Engine: @unchecked Sendable {
         let rls = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(runLoop, rls, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-
-        let interval: CFTimeInterval = 0.002
-        let timer = CFRunLoopTimerCreateWithHandler(
-            kCFAllocatorDefault,
-            CFAbsoluteTimeGetCurrent() + interval,
-            interval,
-            0, 0
-        ) { [unowned self] _ in
-            self.tick()
-        }
-        CFRunLoopAddTimer(runLoop, timer, .commonModes)
     }
 
     fileprivate func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let start = Clock.nowUs()
         defer {
-            // Measure processing duration only (epoch-agnostic). No Task hop.
             let elapsed = Clock.nowUs() - start
             Metrics.shared.recordCallbackLatency(microseconds: elapsed)
             Metrics.shared.recordEvent()
@@ -194,7 +200,7 @@ public final class Engine: @unchecked Sendable {
             }
         }
 
-        if event.getIntegerValueField(.eventSourceUserData) == macapeSyntheticEventMarker {
+        if event.getIntegerValueField(.eventSourceUserData) == EventSink.syntheticEventMarker {
             return Unmanaged.passUnretained(event)
         }
 
@@ -202,8 +208,9 @@ public final class Engine: @unchecked Sendable {
             MacapeLog.engine.error("tap disabled (type=\(type.rawValue)); re-enabling and resetting state")
             Metrics.shared.recordTapDisableRecovery()
             if let tap = self.tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            let actions = HomeRowStateMachine.resetAll(snapshot: &snapshot, layer: config.layer, swaps: config.swaps)
+            let actions = Pipeline.resetAll(snapshot: &snapshot, layer: config.layer, swaps: config.swaps)
             applyActions(actions)
+            rescheduleDeadlineTimer()
             return Unmanaged.passUnretained(event)
         }
 
@@ -213,18 +220,13 @@ public final class Engine: @unchecked Sendable {
 
         let code: CGKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let existing = event.flags
-        let userMods = existing.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
 
-        // Modifier keys arrive as flagsChanged. Only intercept them when they
-        // are a swapped modifier (and macape is enabled); every other
-        // flagsChanged passes through untouched so real modifiers behave
-        // normally. Derive press/release from whether the modifier's flag is set.
         let down: Bool
         let isRepeat: Bool
         if type == .flagsChanged {
             guard snapshot.enabled,
                   config.swaps.mappings[code] != nil,
-                  let flag = HomeRowStateMachine.modifierKeyFlags[code] else {
+                  let flag = FeatureRouter.modifierKeyFlags[code] else {
                 return Unmanaged.passUnretained(event)
             }
             down = existing.contains(flag)
@@ -233,39 +235,44 @@ public final class Engine: @unchecked Sendable {
             down = (type == .keyDown)
             isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         }
-        // Use the hardware event timestamp — accurate hold/tap durations even
-        // under variable callback delivery latency.
-        let now = Clock.eventMs(event)
 
-        let beforeMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        let frame = EventFrame(from: event, keyCode: code, down: down, isRepeat: isRepeat)
+
+        let beforeMods = TimeWheel.activeModifiers(snapshot.keys)
         let beforeStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
-        let outcome = HomeRowStateMachine.handleKeyEvent(
+        let outcome = Pipeline.process(
             snapshot: &snapshot,
             layer: config.layer,
             swaps: config.swaps,
-            keyCode: code,
-            down: down,
-            isRepeat: isRepeat,
-            userMods: userMods,
-            nowMs: now
+            frame: frame
         )
-        let afterMods = HomeRowStateMachine.activeModifiers(snapshot.keys)
+        let afterMods = TimeWheel.activeModifiers(snapshot.keys)
         let afterStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
-        MacapeLog.debug("key code=0x\(String(code, radix: 16)) \(down ? "down" : "up") repeat=\(isRepeat) userMods=\(describeFlags(userMods)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) statesBefore=[\(beforeStates)] statesAfter=[\(afterStates)] actions=[\(describeActions(outcome.actions))]")
+        MacapeLog.debug("key code=0x\(String(code, radix: 16)) \(down ? "down" : "up") repeat=\(isRepeat) userMods=\(describeFlags(frame.userMods)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) statesBefore=[\(beforeStates)] statesAfter=[\(afterStates)] actions=[\(describeActions(outcome.actions))]")
 
+        rescheduleDeadlineTimer()
         return applyHandleActions(outcome, event: event, existing: existing)
     }
 
-    private func tick() {
-        let now = Clock.nowMs()
-        let outcome = HomeRowStateMachine.tick(
+    private func fireDeadlineTimer() {
+        let nowMach = mach_absolute_time()
+        let outcome = Pipeline.advanceTime(
             snapshot: &snapshot,
-            layer: config.layer,
             maxModifierHoldMs: config.maxModifierHoldMs,
-            nowMs: now,
+            nowMach: nowMach,
             keyIsPhysicallyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) }
         )
-        applyActions(outcome)
+        applyTimerActions(outcome)
+        rescheduleDeadlineTimer()
+    }
+
+    private func rescheduleDeadlineTimer() {
+        TimeWheel.rescheduleNextDeadline(
+            keys: snapshot.keys,
+            scheduler: deadlineScheduler
+        ) { [unowned self] in
+            self.fireDeadlineTimer()
+        }
     }
 
     private func applyHandleActions(
@@ -273,40 +280,34 @@ public final class Engine: @unchecked Sendable {
         event: CGEvent,
         existing: CGEventFlags
     ) -> Unmanaged<CGEvent>? {
-        let actions = outcome.actions
-        var passThrough = false
-        var passFlags = existing
         var tapPosts = 0
         var recoveries = 0
-        for action in actions {
-            switch action {
-            case .postKey(let code, let down, let flags):
-                postKey(code, down: down, extra: flags)
-                tapPosts &+= 1
-            case .passThrough(let flags):
-                passThrough = true
-                passFlags = flags
-            case .swallow:
-                recordActionMetrics(
-                    taps: tapPosts,
-                    modifierPromotions: outcome.modifierPromotions,
-                    queueFlushes: outcome.queueFlushes,
-                    recoveries: recoveries
-                )
-                return nil
-            case .stuckRecovery(let key, let reason):
-                emitStuck(key: key, reason: reason)
-                recoveries &+= 1
-            }
+        let result = EventSink.applyActions(
+            outcome,
+            event: event,
+            existing: existing,
+            source: source
+        ) { key, reason in
+            emitStuck(key: key, reason: reason)
+            recoveries &+= 1
         }
+
+        for action in outcome.actions {
+            if case .postKey = action { tapPosts &+= 1 }
+        }
+
         recordActionMetrics(
             taps: tapPosts,
             modifierPromotions: outcome.modifierPromotions,
             queueFlushes: outcome.queueFlushes,
             recoveries: recoveries
         )
-        if passThrough {
-            if !passFlags.isEmpty { event.flags = passFlags }
+
+        if result.swallowed {
+            return nil
+        }
+        if result.passThrough {
+            if !result.passFlags.isEmpty { event.flags = result.passFlags }
             return Unmanaged.passUnretained(event)
         }
         return nil
@@ -327,17 +328,12 @@ public final class Engine: @unchecked Sendable {
     private func applyActions(_ outcome: KeyEventOutcome) {
         var taps = 0
         var recoveries = 0
+        EventSink.applyTimerActions(outcome, source: source) { key, reason in
+            emitStuck(key: key, reason: reason)
+            recoveries &+= 1
+        }
         for action in outcome.actions {
-            switch action {
-            case .postKey(let code, let down, let flags):
-                postKey(code, down: down, extra: flags)
-                taps &+= 1
-            case .passThrough, .swallow:
-                break
-            case .stuckRecovery(let key, let reason):
-                emitStuck(key: key, reason: reason)
-                recoveries &+= 1
-            }
+            if case .postKey = action { taps &+= 1 }
         }
         recordActionMetrics(
             taps: taps,
@@ -351,16 +347,13 @@ public final class Engine: @unchecked Sendable {
         applyActions(KeyEventOutcome(actions: actions))
     }
 
+    private func applyTimerActions(_ outcome: KeyEventOutcome) {
+        applyActions(outcome)
+    }
+
     private func emitStuck(key: CGKeyCode, reason: String) {
         let name = Config.keyName(for: key)
         MacapeLog.stuck.error("stuck recovery key=\(name) reason=\(reason)")
         onEvent?(.stuck(key: name, reason: reason))
-    }
-
-    private func postKey(_ code: CGKeyCode, down: Bool, extra: CGEventFlags) {
-        guard let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
-        e.setIntegerValueField(.eventSourceUserData, value: macapeSyntheticEventMarker)
-        e.flags = e.flags.union(extra)
-        e.post(tap: .cgSessionEventTap)
     }
 }

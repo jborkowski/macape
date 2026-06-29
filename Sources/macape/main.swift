@@ -1,5 +1,6 @@
 import Foundation
 import MacapeCore
+import AppKit
 
 private final class SignalResumeBox: @unchecked Sendable {
     private var didResume = false
@@ -106,6 +107,22 @@ enum MacapeMain {
             Task { await server.broadcast(event) }
         }
 
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let sleepObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            engine.handleSystemWillSleep()
+        }
+        let wakeObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            engine.handleSystemWake()
+        }
+
         try await server.start()
         await publish(engine: engine, server: server, includeMetrics: true)
 
@@ -136,6 +153,8 @@ enum MacapeMain {
         for source in signalSources {
             source.cancel()
         }
+        workspaceCenter.removeObserver(sleepObserver)
+        workspaceCenter.removeObserver(wakeObserver)
         await server.stop()
     }
 
