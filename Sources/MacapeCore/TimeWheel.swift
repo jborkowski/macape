@@ -24,15 +24,34 @@ public enum TimeWheel {
         keys.contains(where: { $0.state == .pending })
     }
 
+    public static func anyModifier(_ keys: [HRKey]) -> Bool {
+        keys.contains(where: { $0.state == .modifier })
+    }
+
     public static func pendingKeyCodes(_ keys: [HRKey]) -> Set<CGKeyCode> {
         Set(keys.filter { $0.state == .pending }.map(\.keyCode))
     }
 
-    public static func nextDeadlineMach(_ keys: [HRKey]) -> UInt64? {
-        keys
+    public static func nextDeadlineMach(
+        _ keys: [HRKey],
+        maxModifierHoldMs: Int,
+        nowMach: UInt64
+    ) -> UInt64? {
+        var candidates: [UInt64] = keys
             .filter { $0.state == .pending && $0.deadlineMach > 0 }
             .map(\.deadlineMach)
-            .min()
+
+        if anyModifier(keys) {
+            candidates.append(nowMach &+ Clock.msToMach(50))
+        }
+
+        if maxModifierHoldMs > 0 {
+            for key in keys where key.state == .modifier && key.modifierSinceMach > 0 {
+                candidates.append(key.modifierSinceMach &+ Clock.msToMach(UInt64(maxModifierHoldMs)))
+            }
+        }
+
+        return candidates.min()
     }
 
     /// Promote all pending keys whose deadline has passed at `nowMach`.
@@ -66,9 +85,14 @@ public enum TimeWheel {
 
     public static func rescheduleNextDeadline(
         keys: [HRKey],
+        maxModifierHoldMs: Int,
         scheduler: DeadlineScheduler,
         handler: @escaping @Sendable () -> Void
     ) {
-        scheduler.schedule(deadlineMach: nextDeadlineMach(keys), handler: handler)
+        let nowMach = mach_absolute_time()
+        scheduler.schedule(
+            deadlineMach: nextDeadlineMach(keys, maxModifierHoldMs: maxModifierHoldMs, nowMach: nowMach),
+            handler: handler
+        )
     }
 }

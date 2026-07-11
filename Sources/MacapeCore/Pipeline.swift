@@ -122,9 +122,8 @@ public enum Pipeline {
                 snapshot.layerConsumed = false
                 return outcome(actions + [.swallow])
             }
-            let mods = TimeWheel.activeModifiers(snapshot.keys)
-            actions.append(.postKey(layer.holdKeyCode, down: true, flags: mods, machTime: frame.machTime))
-            actions.append(.postKey(layer.holdKeyCode, down: false, flags: mods, machTime: frame.machTime))
+            actions.append(.postKey(layer.holdKeyCode, down: true, flags: userMods, machTime: frame.machTime))
+            actions.append(.postKey(layer.holdKeyCode, down: false, flags: userMods, machTime: frame.machTime))
             return outcome(actions)
         }
 
@@ -151,7 +150,10 @@ public enum Pipeline {
         }
 
         // Tier 5: real physical modifiers over a home-row key
-        if !userMods.isEmpty, hrIdx != nil {
+        if !userMods.isEmpty, let idx = hrIdx {
+            if !down, snapshot.keys[idx].state != .idle {
+                clearHomeRowState(snapshot: &snapshot, at: idx)
+            }
             return outcome(actions + [.passThrough(flags: userMods.union(TimeWheel.activeModifiers(snapshot.keys)))])
         }
 
@@ -228,20 +230,13 @@ public enum Pipeline {
             : [.passThrough(flags: userMods.union(mods))]))
     }
 
-    public static func advanceTime(
+    public static func checkModifierDesync(
         snapshot: inout PipelineSnapshot,
         maxModifierHoldMs: Int,
         nowMach: UInt64,
         keyIsPhysicallyDown: (CGKeyCode) -> Bool
     ) -> KeyEventOutcome {
         var actions: [EngineAction] = []
-
-        let advance = TimeWheel.advance(
-            keys: &snapshot.keys,
-            buffer: &snapshot.buffer,
-            nowMach: nowMach
-        )
-        actions.append(contentsOf: advance.actions)
 
         for i in snapshot.keys.indices {
             let key = snapshot.keys[i]
@@ -264,11 +259,30 @@ public enum Pipeline {
             }
         }
 
-        return KeyEventOutcome(
-            actions: actions,
-            modifierPromotions: advance.promotedCount,
-            queueFlushes: advance.flushedBuffer ? 1 : 0
+        return KeyEventOutcome(actions: actions)
+    }
+
+    public static func advanceTime(
+        snapshot: inout PipelineSnapshot,
+        maxModifierHoldMs: Int,
+        nowMach: UInt64,
+        keyIsPhysicallyDown: (CGKeyCode) -> Bool
+    ) -> KeyEventOutcome {
+        let advance = TimeWheel.advance(
+            keys: &snapshot.keys,
+            buffer: &snapshot.buffer,
+            nowMach: nowMach
         )
+        var outcome = checkModifierDesync(
+            snapshot: &snapshot,
+            maxModifierHoldMs: maxModifierHoldMs,
+            nowMach: nowMach,
+            keyIsPhysicallyDown: keyIsPhysicallyDown
+        )
+        outcome.actions = advance.actions + outcome.actions
+        outcome.modifierPromotions = advance.promotedCount
+        outcome.queueFlushes = advance.flushedBuffer ? 1 : 0
+        return outcome
     }
 
     public static func resetAll(

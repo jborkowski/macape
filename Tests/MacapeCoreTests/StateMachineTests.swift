@@ -471,4 +471,178 @@ final class StateMachineTests: XCTestCase {
         XCTAssertEqual(outcomeA.actions, outcomeB)
         XCTAssertEqual(snapshotA, snapshotB)
     }
+
+    // MARK: - Stuck modifier recovery (PLAN-stuck-modifier-cmd-e)
+
+    private func handleWithDesync(
+        snapshot: inout PipelineSnapshot,
+        layer: LayerConfig = .default,
+        swaps: SwapConfig = .empty,
+        keyCode: CGKeyCode,
+        down: Bool,
+        isRepeat: Bool = false,
+        userMods: CGEventFlags = [],
+        nowMs: UInt64,
+        keyIsPhysicallyDown: @escaping (CGKeyCode) -> Bool = { _ in true }
+    ) -> KeyEventOutcome {
+        let outcome = Pipeline.handleKeyEvent(
+            snapshot: &snapshot,
+            layer: layer,
+            swaps: swaps,
+            keyCode: keyCode,
+            down: down,
+            isRepeat: isRepeat,
+            userMods: userMods,
+            nowMs: nowMs
+        )
+        guard TimeWheel.anyModifier(snapshot.keys) else { return outcome }
+        let desync = Pipeline.checkModifierDesync(
+            snapshot: &snapshot,
+            maxModifierHoldMs: 10_000,
+            nowMach: Clock.msToMach(nowMs),
+            keyIsPhysicallyDown: keyIsPhysicallyDown
+        )
+        guard !desync.actions.isEmpty else { return outcome }
+        return KeyEventOutcome(
+            actions: outcome.actions + desync.actions,
+            modifierPromotions: outcome.modifierPromotions,
+            queueFlushes: outcome.queueFlushes
+        )
+    }
+
+    func testNextDeadlineMachIncludesModifierWatchdog() {
+        var hrKey = key(0x00, hold: 100)
+        hrKey.state = .modifier
+        hrKey.modifierSinceMach = Clock.msToMach(1000)
+        let nowMach = Clock.msToMach(1200)
+
+        let deadline = TimeWheel.nextDeadlineMach(
+            [hrKey],
+            maxModifierHoldMs: 10_000,
+            nowMach: nowMach
+        )
+        XCTAssertNotNil(deadline)
+        XCTAssertGreaterThan(deadline!, nowMach)
+    }
+
+    func testModifierDesyncRecoversViaTimerWithoutPendingKeys() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00)])
+        snapshot.keys[0].state = .modifier
+        snapshot.keys[0].modifierSinceMach = Clock.msToMach(1000)
+
+        let outcome = Pipeline.tick(
+            snapshot: &snapshot,
+            layer: LayerConfig.default,
+            maxModifierHoldMs: 10_000,
+            nowMs: 1100,
+            keyIsPhysicallyDown: { _ in false }
+        )
+        XCTAssertEqual(snapshot.keys[0].state, .idle)
+        XCTAssertTrue(outcome.actions.contains(where: {
+            if case .stuckRecovery = $0 { return true }
+            return false
+        }))
+    }
+
+    func testModifierDesyncRecoversOnNextKeyEvent() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100)])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = Pipeline.tick(
+            snapshot: &snapshot,
+            layer: LayerConfig.default,
+            maxModifierHoldMs: 10_000,
+            nowMs: 1200,
+            keyIsPhysicallyDown: { _ in true }
+        )
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1250)
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: false, nowMs: 1260)
+        XCTAssertEqual(snapshot.keys[0].state, .modifier)
+
+        let outcome = handleWithDesync(
+            snapshot: &snapshot,
+            keyCode: 49,
+            down: true,
+            nowMs: 1300,
+            keyIsPhysicallyDown: { code in code == 0x00 ? false : true }
+        )
+        XCTAssertEqual(snapshot.keys[0].state, .idle)
+        XCTAssertTrue(outcome.actions.contains(where: {
+            if case .stuckRecovery(0x00, let reason) = $0 { return reason.contains("desync") }
+            return false
+        }))
+    }
+
+    func testCmdEThenSpaceDoesNotEmitCmdSpace() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100)])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = Pipeline.tick(
+            snapshot: &snapshot,
+            layer: LayerConfig.default,
+            maxModifierHoldMs: 10_000,
+            nowMs: 1200,
+            keyIsPhysicallyDown: { _ in true }
+        )
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1250)
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: false, nowMs: 1260)
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: false, nowMs: 1270)
+
+        _ = handle(snapshot: &snapshot, keyCode: 49, down: true, nowMs: 1300)
+        let spaceUp = handle(snapshot: &snapshot, keyCode: 49, down: false, nowMs: 1310)
+
+        let spaceActions = spaceUp.filter {
+            if case .postKey = $0 { return true }
+            return false
+        }
+        XCTAssertFalse(spaceActions.contains(where: {
+            if case .postKey(_, _, let flags, _) = $0 { return flags.contains(.maskCommand) }
+            return false
+        }))
+    }
+
+    func testCmdEThenLostAUpSpaceDoesNotStick() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00, hold: 100)])
+        _ = handle(snapshot: &snapshot, keyCode: 0x00, down: true, nowMs: 1000)
+        _ = Pipeline.tick(
+            snapshot: &snapshot,
+            layer: LayerConfig.default,
+            maxModifierHoldMs: 10_000,
+            nowMs: 1200,
+            keyIsPhysicallyDown: { _ in true }
+        )
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: true, nowMs: 1250)
+        _ = handle(snapshot: &snapshot, keyCode: 0x0E, down: false, nowMs: 1260)
+        XCTAssertEqual(snapshot.keys[0].state, .modifier)
+
+        _ = handleWithDesync(
+            snapshot: &snapshot,
+            keyCode: 49,
+            down: true,
+            nowMs: 1300,
+            keyIsPhysicallyDown: { code in code == 0x00 ? false : true }
+        )
+        let spaceUp = handle(snapshot: &snapshot, keyCode: 49, down: false, nowMs: 1310)
+
+        XCTAssertEqual(snapshot.keys[0].state, .idle)
+        XCTAssertFalse(Pipeline.activeModifiers(snapshot.keys).contains(.maskCommand))
+        XCTAssertFalse(spaceUp.contains(where: {
+            if case .postKey(49, _, let flags, _) = $0 { return flags.contains(.maskCommand) }
+            return false
+        }))
+    }
+
+    func testTier5HomeRowUpClearsModifierState() {
+        var snapshot = PipelineSnapshot(keys: [key(0x00)])
+        snapshot.keys[0].state = .modifier
+        snapshot.keys[0].modifierSinceMach = Clock.msToMach(1000)
+
+        _ = handle(
+            snapshot: &snapshot,
+            keyCode: 0x00,
+            down: false,
+            userMods: .maskCommand,
+            nowMs: 1100
+        )
+        XCTAssertEqual(snapshot.keys[0].state, .idle)
+        XCTAssertFalse(Pipeline.activeModifiers(snapshot.keys).contains(.maskCommand))
+    }
 }

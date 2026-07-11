@@ -175,4 +175,43 @@ final class EngineTimingE2ETests: XCTestCase {
         posted = event.timestamp
         XCTAssertEqual(posted, stamp)
     }
+
+    func testModifierWatchdogFiresAfterPromotionWithNoMoreEvents() {
+        var snapshot = makeSnapshot(holdMs: 100)
+        let src = CGEventSource(stateID: .hidSystemState)
+        let epoch = mach_absolute_time()
+
+        let aDown = makeStampedEvent(virtualKey: 0x00, keyDown: true, epochMach: epoch, offsetMs: 0, source: src)
+        _ = drive(snapshot: &snapshot, event: aDown, keyCode: 0x00, down: true)
+
+        let promoteMach = epoch + Clock.msToMach(120)
+        let outcome = Pipeline.advanceTime(
+            snapshot: &snapshot,
+            maxModifierHoldMs: 10_000,
+            nowMach: promoteMach,
+            keyIsPhysicallyDown: { _ in true }
+        )
+        XCTAssertEqual(snapshot.keys[0].state, .modifier)
+        XCTAssertEqual(outcome.modifierPromotions, 1)
+
+        let deadline = TimeWheel.nextDeadlineMach(
+            snapshot.keys,
+            maxModifierHoldMs: 10_000,
+            nowMach: promoteMach
+        )
+        XCTAssertNotNil(deadline)
+        XCTAssertGreaterThan(deadline!, promoteMach)
+
+        let recovery = Pipeline.advanceTime(
+            snapshot: &snapshot,
+            maxModifierHoldMs: 10_000,
+            nowMach: promoteMach + Clock.msToMach(60),
+            keyIsPhysicallyDown: { _ in false }
+        )
+        XCTAssertEqual(snapshot.keys[0].state, .idle)
+        XCTAssertTrue(recovery.actions.contains(where: {
+            if case .stuckRecovery = $0 { return true }
+            return false
+        }))
+    }
 }

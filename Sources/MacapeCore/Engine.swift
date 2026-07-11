@@ -240,12 +240,23 @@ public final class Engine: @unchecked Sendable {
 
         let beforeMods = TimeWheel.activeModifiers(snapshot.keys)
         let beforeStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
-        let outcome = Pipeline.process(
+        var outcome = Pipeline.process(
             snapshot: &snapshot,
             layer: config.layer,
             swaps: config.swaps,
             frame: frame
         )
+        if TimeWheel.anyModifier(snapshot.keys) {
+            let desync = Pipeline.checkModifierDesync(
+                snapshot: &snapshot,
+                maxModifierHoldMs: config.maxModifierHoldMs,
+                nowMach: frame.machTime,
+                keyIsPhysicallyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) }
+            )
+            if !desync.actions.isEmpty {
+                outcome.actions.append(contentsOf: desync.actions)
+            }
+        }
         let afterMods = TimeWheel.activeModifiers(snapshot.keys)
         let afterStates = snapshot.keys.map { "0x\(String($0.keyCode, radix: 16))=\($0.state)" }.joined(separator: " ")
         MacapeLog.debug("key code=0x\(String(code, radix: 16)) \(down ? "down" : "up") repeat=\(isRepeat) userMods=\(describeFlags(frame.userMods)) activeBefore=\(describeFlags(beforeMods)) activeAfter=\(describeFlags(afterMods)) statesBefore=[\(beforeStates)] statesAfter=[\(afterStates)] actions=[\(describeActions(outcome.actions))]")
@@ -269,6 +280,7 @@ public final class Engine: @unchecked Sendable {
     private func rescheduleDeadlineTimer() {
         TimeWheel.rescheduleNextDeadline(
             keys: snapshot.keys,
+            maxModifierHoldMs: config.maxModifierHoldMs,
             scheduler: deadlineScheduler
         ) { [unowned self] in
             self.fireDeadlineTimer()
